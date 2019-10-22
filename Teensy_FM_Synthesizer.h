@@ -64,6 +64,8 @@
 #define GP3_CC_LSB 50
 #define GP4_CC_MSB 19
 #define GP4_CC_LSB 51
+#define BANKSEL_CC_LSB 32
+#define BANKSEL_CC_MSB 0
 #define U1_CC_MSB 20
 #define U1_CC_LSB 52
 #define U2_CC_MSB 21
@@ -121,6 +123,8 @@
 #define KNOB7 7
 #define KNOB8 8
 #define KNOB9 9
+#define LONG_PRESS_TIME 500
+#define REALLY_LONG_PRESS_TIME 2000
 
 // Number of bits of Due's analog input.
 #define ANALOG_RESOLUTION 12
@@ -150,6 +154,7 @@ extern uint8_t default_presetAlgorithm[PRESET_VOICES];
 extern char * default_patchNames[PRESET_VOICES];
 
 #define NUM_BANKS 2
+#define USER_BANK 1
 
 // 10 bit sine wave table.
 extern const int16_t sineTable[SINE_TABLE_SIZE];
@@ -181,7 +186,9 @@ enum knobsControl
 {
     STANDBY,
     ADSR,
-    PARAMETERS
+    PARAMETERS,
+    MENU,
+    SAVE
 };
 
 extern char * knobsControlDisp[];
@@ -205,16 +212,7 @@ enum adsrParameters_e
     RRELEASE
 };
 
-extern char * adsrParamDisp [];;
-
-// Typedef to know what the knobs are controling and to update a parameter only if the knob passed by the old parameter value.
-typedef struct
-{
-    knobsControl control;
-//    bool triggered[MAX_KNOBS];
-//    bool oldValueIsGreater[MAX_KNOBS];
-//    uint16_t oldValue[MAX_KNOBS];
-} knobs_t;
+extern char * adsrParamDisp [];
 
 
 // Typedef to know the key to note index relation.
@@ -235,14 +233,16 @@ typedef struct
 typedef struct
 {
     bool playMode;
+    knobsControl control;
     bool sustainPedalOn;
     pitchBend_t pitchBend;
-    knobs_t knobs;
     uint8_t channel;
     uint8_t selectedOperator;
     uint8_t algorithm;
     uint8_t presetVoice;
     uint8_t bank;
+    uint8_t prevVoice;
+    uint8_t prevBank;
     bool modified;
     uint16_t volume;
     keyToNote_t keyMapping[NUM_KEYS];
@@ -309,10 +309,3 @@ typedef struct
     int16_t feedback;
     envelopeStatus_t adsrStatus[NUM_OPERATORS];
 } note_t;
-
-// Typedef to keep track of when a button is pushed. Used to increment a counter with each push.
-typedef struct
-{
-    bool pressed;
-    bool lastState;
-} buttonState_t;

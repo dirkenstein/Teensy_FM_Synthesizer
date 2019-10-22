@@ -43,16 +43,6 @@ synth_t synth;
 note_t notes[MAX_POLYPHONY];
 // Operators info.
 operator_t operators[NUM_OPERATORS];
-// Algorithm button press state info.
-
-buttonState_t statefulButtons[5];
-//buttonState_t algorithmButton;
-// Keyboard level scaling button press state (left and right) info.
-//buttonState_t levelScalingButton[2];
-// ADSR button press state info.
-//buttonState_t adsrButton;
-// Preset button press state info.
-//buttonState_t presetButton;
 
 // Pointer to the algorithms functions when using an external DAC.
 void (*DACAlgorithmsHandler[NUM_ALGORITHMS])(void) = {algorithm0, algorithm1, algorithm2, algorithm3, algorithm4, algorithm5, algorithm6, algorithm7,
@@ -147,16 +137,44 @@ Adafruit_MCP23017 expander2;
 Adafruit_MCP23017 expander3;
 
 
+
+#define MENU_LINES 5
+#define MENU_ITEMS 7
+
+typedef struct {
+  char * line;
+  uint8_t * data;  
+} menu_t;
+
+menu_t theMenu [MENU_ITEMS] = { 
+  {"MIDI CHAN: %-2d", &synth.channel},
+  {"OP0 SRC  : %-2d", &operators[0].src_sel},
+  {"OP1 SRC  : %-2d", &operators[1].src_sel},
+  {"OP2 SRC  : %-2d", &operators[2].src_sel},
+  {"OP3 SRC  : %-2d", &operators[3].src_sel},
+  {"OP4 SRC  : %-2d", &operators[4].src_sel},
+  {"OP5 SRC  : %-2d", &operators[5].src_sel},
+
+};
+
+int windowStart = 0;
+int selectedItem = 0;
+
+
 int NumVoices[NUM_BANKS] = {0, 0};
 int NumParams = 0;
 char ** patchNames[NUM_BANKS];
 uint8_t *  presetAlgorithm[NUM_BANKS];
 int16_t *** presetVoice[NUM_BANKS];
 
+#define DISPLAY_CS 9
+#define DISPLAY_DC 15
+#define DISPLAY_RESET 14
+//#define DISPLAY_RESET U8X8_PIN_NONE
 //SSD1306_text display;
-//U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+//U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, DISPLAY_RESET);
 
-U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI display(U8G2_R0, /* cs=*/ 9, /* dc=*/ 15, /* reset=*/ 14);
+U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI display(U8G2_R0, /* cs=*/ DISPLAY_CS, /* dc=*/ DISPLAY_DC, /* reset=*/ DISPLAY_RESET);
 volatile int knobs[MAX_KNOBS] = {MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, 0, 0, MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, 0, MAX_DIGITAL_VALUE/2};
 
 #define NO_ENCODER_INTERRUPTS
@@ -164,11 +182,15 @@ volatile int knobs[MAX_KNOBS] = {MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, MAX_D
 volatile bool gotInt = false;
 volatile unsigned long inttime;
 
+
 int minvals [MAX_KNOBS];
 int maxvals [MAX_KNOBS];
 uint8_t lastSeq[MAX_KNOBS];
 volatile bool buttons[MAX_BUTTONS];
 volatile bool buttonsChanged[MAX_BUTTONS];
+uint32_t lastButtonChange[MAX_BUTTONS];
+uint32_t buttonChange[MAX_BUTTONS];
+
 volatile bool knobChanged[MAX_KNOBS];
 
 const uint8_t stateMachineR [] = {2, 0, 1, 3};
@@ -183,6 +205,7 @@ volatile bool knobsNeedUpdating = false;
 uint32_t lastDisplayUpdate = 0;
 volatile bool isConnected = false;
 
+char * standbyMessage = NULL;
 bool gotWifi = false;
 
 void handleencbtn() {
@@ -214,8 +237,12 @@ void handleencbtn() {
             //else bval = (pins3>>((6- (x/2)))) & 1;
             if (x < 7) bval = (pins4>>(x)) & 1;
             else bval = (pins5>>(x-7)) & 1;
-            if (bval != buttons[x]) buttonsChanged[x] = true;
-               buttons[x] = bval;
+            if (bval != buttons[x]) {
+              buttonsChanged[x] = true;
+              buttons[x] = bval;
+              lastButtonChange[x] = buttonChange[x];
+              buttonChange[x] = inttime;
+            }
           }
       //}
       //if (lastPin2 != 255) { 
@@ -327,6 +354,8 @@ void setup_encoders()
     for (int x =0; x < MAX_BUTTONS; x++) {
       buttons[x] = 1;
       buttonsChanged[x] = false;
+      buttonChange[x] = 0;
+      lastButtonChange[x] = 0;
     }
     for (int x =0; x < MAX_KNOBS; x++) {
       if (x == 3 || x == 4 || x == 6) {
@@ -334,8 +363,8 @@ void setup_encoders()
         knobs[x] = 0;
       }
       else if (x == 9) {
-        knobs[x] = 0;
-        maxvals[x] = NumVoices[synth.bank] -1;
+        knobs[x] = 0; //Go to prev bank
+        maxvals[x] = NumVoices[synth.bank] +1; //Not -1 
       }
       else {
         maxvals[x] = MAX_DIGITAL_VALUE;
@@ -451,11 +480,6 @@ void createUserBank(int bank, int nvoices)
 void read_presets(uint8_t bank, char * fname) 
 {   
     Serial.println("Read presets");    
-    if (!SD.begin(SD_CS_PIN)) {
-      Serial.println("Can't open SD card");
-      setDefaultVoice();
-      return;
-    }
     File f = SD.open(fname, FILE_READ);
     if (!f) {
       Serial.println("Unable to open presets file");
@@ -534,7 +558,7 @@ void build_Preset_file(uint8_t bank, char *fname)
       return;
   }
   f.seek(0);
-  serializeJson(doc, f);
+  serializeJsonPretty(doc, f);
   f.close();
 
 }
@@ -571,7 +595,7 @@ void setup()
     //display.init();
     display.begin();
     display.clear();
-    display.setFont(u8g2_font_5x7_mr);
+    display.setFont(u8g2_font_5x7_mf);
     display.setFontMode(0);
     display.setFontPosTop();
     display.setDrawColor(0);
@@ -588,16 +612,23 @@ void setup()
 #else
     Serial1.begin(31250);
 #endif
-   digitalWrite(9, HIGH);
-   read_presets(0, "presets.jsn");
-   if (SD.exists("user.jsn")) {
-    read_presets(1, "user.jsn");
+   digitalWrite(DISPLAY_CS, HIGH);
+   if (!SD.begin(SD_CS_PIN)) {
+      Serial.println("Can't open SD card");
+      setDefaultVoice();
    } else {
-     createUserBank(1, 5);
+    read_presets(0, "presets.jsn");
+    if (SD.exists("user.jsn")) {
+      Serial.println("readin user bank");
+      read_presets(USER_BANK, "user.jsn");
+    } else {
+      createUserBank(USER_BANK, 5);
+      Serial.println("writing new user bank");
 
-     build_Preset_file(1, "user.jsn");
+      build_Preset_file(USER_BANK, "user.jsn");
+    }
    }
-   digitalWrite(10, HIGH);
+   digitalWrite(SD_CS_PIN, HIGH);
 
    setup_encoders();
 
@@ -683,7 +714,7 @@ void setup()
 void reset()
 {
     // Sets the knobs to standby and sets the operator 0 and the algorithm 0 as active. Channel is assigned the value 1 so that it becomes 0 when the sound synthesis function is called for the first time.
-    synth.knobs.control = STANDBY;
+    synth.control = STANDBY;
     synth.selectedOperator = 0;
     synth.algorithm = 0;
     synth.presetVoice = 0;
@@ -700,7 +731,8 @@ void reset()
     synth.pitchBend.bentDown = false;
     synth.pitchBend.value = 8192;
     synth.sustainPedalOn = false;
-
+    synth.prevVoice = 0;
+    synth.prevBank = 0;
     for (uint8_t l = 0; l < NUM_KEYS; ++l)
         synth.keyMapping[l].on = false;
 
@@ -811,33 +843,27 @@ void levelScalingCycle(int which)
       updateNotesScaledOperatorLevel(synth.selectedOperator);
 }
 
+void restoreBankIfSave() {
+  if (synth.control == SAVE) {
+          synth.bank = synth.prevBank;
+          synth.presetVoice = synth.prevVoice;
+          maxvals[KNOB9] = NumVoices[synth.bank] + 1;
+          knobs[KNOB9] = synth.presetVoice;
+   }
+}
 elapsedMillis loopMillis;
+elapsedMillis standbyMillis;
+
+void setStandbyMessage(const char * msg)
+{
+  standbyMillis = 0;
+  standbyMessage = msg;
+  displayNeedsUpdating = true;
+}
 
 void loop()
 {   
   
-#ifdef AUDIO_IN_MAIN_LOOP 
- const uint16_t audio_block_time_us = 1000000 / (SAMPLE_RATE / AUDIO_BLOCK_SAMPLES);
-
-  // Main sound calculation
-  if (fill_audio_buffer > audio_block_time_us - 10)
-  {
-    fill_audio_buffer = 0;
-
-    elapsedMicros t1;
-    DACAlgorithmsHandler[synth.algorithm]();
-    if (t1 > audio_block_time_us) // everything greater 2.9ms is a buffer underrun!
-      xrun++;
-    if (t1 > render_time_max)
-      render_time_max = t1;
-    //if (peak1.available())
-    //{
-     // if (peak1.read() > 0.99)
-     //   peak++;
-    //}
-
-  }
-#endif
 
     //uint16_t buttonValues =  lastButtons;
     //Serial.println((int)synth.playMode);
@@ -847,8 +873,9 @@ void loop()
     for (int x = MIN_PARAM_BUTTON; x < MAX_PARAM_BUTTON + 1; x++) {
       if (buttonsChanged[x] && buttons[x] == 0) {
         Serial.printf("button %d : %d\n", x, buttons[x]);
-        buttonsChanged[x] = false;
-        synth.knobs.control = PARAMETERS;
+        buttonsChanged[x] = false;        
+        restoreBankIfSave();
+        synth.control = PARAMETERS;
         synth.playMode = false;
         synth.selectedOperator = x - MIN_PARAM_BUTTON;
         updateKnobsParameters(synth.selectedOperator);
@@ -859,14 +886,22 @@ void loop()
 
     for (int x = MIN_STATEFUL_BUTTON; x < MAX_STATEFUL_BUTTON +1; x++) {
       if(buttonsChanged[x]) {
-        Serial.printf("s button %d : %d\n", x, buttons[x]);
+        Serial.printf("s button %d : %d %d\n", x, buttons[x], buttonChange[x] - lastButtonChange[x]);
         buttonsChanged[x] = false;
         if (buttons[x] == 1) {
+               bool longPress = buttonChange[x] - lastButtonChange[x] > LONG_PRESS_TIME;
+               bool reallyLongPress = buttonChange[x] - lastButtonChange[x] > REALLY_LONG_PRESS_TIME;
+               if (reallyLongPress) longPress = false;
                //Serial.printf("s button %d actuated", x);
+               if (longPress) {
+                   Serial.println("long press");
+               }
+               
                switch(x) {
                 
                   case ALGORITHM_BUTTON:
-                      // Selects the synthesizer's algorithm.
+                    // Selects the synthesizer's algorithm.
+                    restoreBankIfSave();
                     if (synth.algorithm >= NUM_ALGORITHMS - 1)
                         synth.algorithm = 0;
                     else
@@ -877,45 +912,93 @@ void loop()
   #endif
                     break;
                  case LEVEL_SCALING_LEFT_BUTTON:
+                    restoreBankIfSave();
                     levelScalingCycle(0);
                      synth.modified = true;
                     break;
                  case LEVEL_SCALING_RIGHT_BUTTON:
+                    restoreBankIfSave();
                     levelScalingCycle(1);
                     synth.modified = true;
                     break;
                  case ADSR_BUTTON:
-                     // Sets the knobs to change the ADSR values of an operator (increments with every press).
-                    if (synth.knobs.control != ADSR)
-                      {
-                          synth.knobs.control = ADSR;
-                          synth.playMode = false;
-                          synth.selectedOperator = 0;
+                    if (synth.control == MENU) {
+                      //Menu select logic goes here
+                      if(longPress) {
+                        synth.control = STANDBY;
+                        knobs[KNOB9] = synth.presetVoice;
+                        maxvals[KNOB9] = NumVoices[synth.bank] + 1;
+                      } else {
+                        Serial.println ("Menu select not implemented");
                       }
-                      else if (synth.selectedOperator < (NUM_OPERATORS - 1))
-                          ++synth.selectedOperator;
-                      else
-                          synth.selectedOperator = 0;        
-                    updateKnobsParameters(synth.selectedOperator);
-                    knobsNeedUpdating = true; 
+                     } else if (synth.control == SAVE) {
+                        if (longPress) {
+                          restoreBankIfSave();
+                          synth.control = STANDBY;
+                          setStandbyMessage("Not Saved...");
+
+                        } else if (reallyLongPress) {
+                            restoreBankIfSave();
+                            synth.control = STANDBY;
+                            synth.modified = false;
+                            loadPresetVoice(synth.bank, synth.presetVoice -1);
+                            setStandbyMessage("Discarded Changes...");
+                        }else {
+                          savePresetVoice(synth.bank, synth.presetVoice -1);
+                          digitalWrite(DISPLAY_CS, HIGH);
+                          build_Preset_file(USER_BANK, "user.jsn");
+                          digitalWrite(SD_CS_PIN, HIGH);
+                          synth.modified = false;
+                          synth.control = STANDBY;
+                          setStandbyMessage("Saved to User Bank...");
+                        }
+                     } else {
+                      if (longPress) {
+                        synth.control = MENU;
+                        knobs[KNOB9] = 0;
+                        maxvals[KNOB9] = MENU_ITEMS-1;
+                      } else {
+                        // Sets the knobs to change the ADSR values of an operator (increments with every press).
+                        if (synth.control != ADSR)
+                        {
+                            synth.control = ADSR;
+                            synth.playMode = false;
+                            synth.selectedOperator = 0;
+                        }
+                        else if (synth.selectedOperator < (NUM_OPERATORS - 1))
+                            ++synth.selectedOperator;
+                        else
+                            synth.selectedOperator = 0;        
+                        updateKnobsParameters(synth.selectedOperator);
+                        knobsNeedUpdating = true;
+                       }
+                    }                
                     break;
                  case PRESET_BUTTON:
-                    synth.knobs.control = STANDBY;
+                    //Blat the save
+                    restoreBankIfSave();
+                    synth.control = STANDBY;
                     if (synth.playMode == true) {
                         if (synth.presetVoice < NumVoices[synth.bank])
                         {
                             loadPresetVoice(synth.bank, synth.presetVoice);
                             ++synth.presetVoice;
+                            knobs[KNOB9] = synth.presetVoice;
                         }
                         else
                         {
+                            synth.bank++;
+                            if (synth.bank == NUM_BANKS) synth.bank = 0;
                             loadPresetVoice(synth.bank, 0);
                             synth.presetVoice = 1;
+                            knobs[KNOB9] = synth.presetVoice;
+                            maxvals[KNOB9] = NumVoices[synth.bank] + 1;
                         }
                     }
                     // Prints parameters to the serial monitor.
                     printParameters();
                     synth.playMode = true;
+                    synth.modified = false;
                     break;
                  default:
                    Serial.printf("Unk Button %d\n", x);
@@ -926,7 +1009,7 @@ void loop()
       }
     }
     // Scans the parameters values for the selected operator. Each knob value should pass by the old parameter value once before it starts to update that value (takes into consideration an EPSILON).
-    if (synth.knobs.control == PARAMETERS)
+    if (synth.control == PARAMETERS)
     {   
 
         if (knobTriggered(KNOB0))
@@ -988,7 +1071,7 @@ void loop()
         else updateNotesScaledOperatorStep(synth.selectedOperator);   
     }
     // Scans the ADSR rate and level values for the selected operator. Each knob value should pass by the old parameter value once before it starts to update that value (takes into consideration an EPSILON).
-    else if (synth.knobs.control == ADSR)
+    else if (synth.control == ADSR)
     {
         if (knobTriggered(KNOB0)) 
         {
@@ -1047,12 +1130,57 @@ void loop()
           synth.volume = KNOBMAP(knobs[KNOB8]);
     }
     if (knobTriggered(KNOB9)) 
-    {
-           synth.knobs.control = STANDBY;
-           synth.presetVoice = knobs[KNOB9] +1;
-           loadPresetVoice(synth.bank, knobs[KNOB9]);
-           synth.playMode = true;
-           printParameters();
+    {  
+           if (synth.control == MENU) {
+              selectedItem = knobs[KNOB9];
+              if (selectedItem <  windowStart) {
+                windowStart = selectedItem;
+              } else if ((selectedItem -windowStart) + 1> MENU_LINES) {
+                windowStart = selectedItem+1 -MENU_LINES;
+              }
+              //0-4 window 0-6 menu window 0 selected 5
+              //
+  
+              displayNeedsUpdating=true;
+           } else if (synth.modified  && synth.control != SAVE) {
+             synth.prevBank = synth.bank;
+             synth.prevVoice = synth.presetVoice; 
+             synth.control = SAVE;
+             synth.bank = USER_BANK;
+             if (synth.presetVoice > NumVoices[synth.bank]) {
+              synth.presetVoice = 1; 
+             }
+             knobs[KNOB9] = synth.presetVoice;
+             maxvals[KNOB9] = NumVoices[synth.bank] +1;
+           } else {
+             if (synth.control != SAVE) synth.control = STANDBY;
+           
+             if (knobs[KNOB9] == 0) {
+               if (synth.control != SAVE) {
+                if (synth.bank == 0) synth.bank = NUM_BANKS-1;
+                else synth.bank--;
+               }
+               synth.presetVoice = NumVoices[synth.bank];
+               knobs[KNOB9] = NumVoices[synth.bank];
+               maxvals[KNOB9] = NumVoices[synth.bank] +1;
+             } else if (knobs[KNOB9] == NumVoices[synth.bank] +1) {
+               if (synth.control != SAVE) {
+                 if (synth.bank == NUM_BANKS -1) synth.bank = 0;
+                 else synth.bank++;
+               }
+               synth.presetVoice = 1;
+               knobs[KNOB9] = 1;
+               maxvals[KNOB9] = NumVoices[synth.bank] +1;
+             } else {
+               synth.presetVoice = knobs[KNOB9];
+             }
+             if (synth.control != SAVE) {
+              loadPresetVoice(synth.bank, synth.presetVoice -1);
+             
+              synth.playMode = true;
+              printParameters();
+            }
+           }
     }
     // Scans for MIDI note on/off messages.
     //MIDI.read();
@@ -1097,6 +1225,10 @@ void loop()
     if (loopMillis > 2000) {
       loopMillis =0;
       show_audio_load();
+    }
+    if (standbyMessage && standbyMillis > 5000) {
+      standbyMessage = NULL;
+      displayNeedsUpdating = true;
     }
 }
 
@@ -1214,7 +1346,7 @@ uint16_t last14BitCC[128];
 
 void midiControlChangeHandler(byte channel, byte number, byte value)
 {
-    uint8_t newop, newalg, newsrc, lsPos, newLsPos;
+    uint8_t newop, newalg, newsrc, newbank, lsPos, newLsPos;
     int8_t knob;
     uint16_t newvalue;
     // In case the message was from the sustain pedal.
@@ -1272,7 +1404,7 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
           if (newalg > NUM_ALGORITHMS -1) newalg = NUM_ALGORITHMS -1;
           if (newalg != synth.algorithm) {
             synth.algorithm = newalg;
-            knobs[KNOB9] = newalg;
+            //knobs[KNOB9] = newalg;
 #ifdef ESP8266
             i2s_set_callback(DACAlgorithmsHandler[synth.algorithm]);
 #endif
@@ -1281,14 +1413,30 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
 
           }
           break;
+
+
+        case BANKSEL_CC_MSB: //bank select
+          newbank = value;
+          if (newbank > NUM_BANKS -1) newbank = NUM_BANKS -1;
+            if (newbank != synth.bank) {
+              synth.bank = newbank;
+              //Serial.println(program);
+              if(synth.presetVoice > NumVoices[synth.bank]) synth.presetVoice = 1;
+              loadPresetVoice(synth.bank, synth.presetVoice -1);
+              synth.playMode = true;
+              synth.control = STANDBY;
+              printParameters();
+              displayNeedsUpdating = true;
+              knobsNeedUpdating = true;
+            }
+          break;
         case GP1_CC_MSB: //operator select
-          //newop = map(value,0, MAX_MIDI_VALUE_7, 0,NUM_OPERATORS -1) ;
           newop = value;
           if (newop > NUM_OPERATORS -1) newop = NUM_OPERATORS -1;
           if (newop != synth.selectedOperator) {
             synth.playMode = false;
-            if (synth.knobs.control != ADSR)
-              synth.knobs.control = PARAMETERS;
+            if (synth.control != ADSR)
+              synth.control = PARAMETERS;
             synth.selectedOperator = newop;
             updateKnobsParameters(synth.selectedOperator);
             displayNeedsUpdating = true;
@@ -1333,11 +1481,11 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
           break;
         case GP5_CC_MSB: //Mode select
           if (value <=63) {
-            synth.knobs.control = PARAMETERS;
+            synth.control = PARAMETERS;
             synth.playMode = false;
             //synth.selectedOperator = 0;
           } else {
-            synth.knobs.control = ADSR;
+            synth.control = ADSR;
             synth.playMode = false;
             //synth.selectedOperator = 0;
           }
@@ -1361,7 +1509,7 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
             //Serial.println(knob);
             uint16_t oldvalue = knobs[knob];
 
-            if (synth.knobs.control == PARAMETERS) { 
+            if (synth.control == PARAMETERS) { 
               if (knob == KNOB3 || knob == KNOB4) {
                 //synth.knobs.oldValue[knob] = knobs[knob];
                 maxvals[knob] = MAX_PARAMETERS_LEVEL;
@@ -1424,7 +1572,7 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
                   knobs[knob] = PARAMMAP(operators[operatorIndex].levelScaling.depth[1]);
                   break;
               }
-             } else if (synth.knobs.control == ADSR) {
+             } else if (synth.control == ADSR) {
                 //if(knob % 2 == 0) synth.knobs.oldValue[knob] = KNOBMAP(knobs[knob]);
                 //else synth.knobs.oldValue[knob] = REVKNOBMAP(knobs[knob]);
                 maxvals[knob] = MAX_DIGITAL_VALUE;
@@ -1482,8 +1630,10 @@ void midiProgramChangeHandler(byte channel,  byte program)
     //Serial.println(program);
     if(program + 1 > NumVoices[synth.bank]) program = 0;
     loadPresetVoice(synth.bank, program);
+    knobs[KNOB9] = program;
     synth.presetVoice = program + 1;
     synth.playMode = true;
+    synth.control = STANDBY;
     printParameters();
     displayNeedsUpdating = true;
 }
@@ -1833,7 +1983,7 @@ __attribute__((always_inline)) inline void updateKnobsParameters(uint8_t operato
 {
    // for (uint8_t i = 0; i < 8; ++i)
    //     synth.knobs.triggered[i] = false;
-    if (synth.knobs.control == PARAMETERS)
+    if (synth.control == PARAMETERS)
     {         
       for (int x = 0; x < MAX_KNOBS -2; x++)
       {
@@ -1862,7 +2012,7 @@ __attribute__((always_inline)) inline void updateKnobsParameters(uint8_t operato
         knobs[KNOB7] = PARAMMAP(operators[operatorIndex].levelScaling.depth[1]);
 
     }   
-    else if (synth.knobs.control == ADSR)
+    else if (synth.control == ADSR)
     {
        for (int x = 0; x < MAX_KNOBS -2; x++)
        {   
@@ -1884,12 +2034,12 @@ __attribute__((always_inline)) inline void updateKnobsParameters(uint8_t operato
 
     for (int x = KNOB8; x < MAX_KNOBS; x++) {
          //synth.knobs.oldValue[x] = KNOBMAP(knobs[x]);
-         if (x == KNOB9) maxvals[x] = NumVoices[synth.bank] -1; 
+         if (x == KNOB9) maxvals[x] = NumVoices[synth.bank] +1; //NOT -1  
          else maxvals[x] = MAX_DIGITAL_VALUE;
          minvals[x] = 0;
     }
     knobs[KNOB8] = PARAMMAP(synth.volume);
-    knobs[KNOB9] = synth.presetVoice -1;
+    knobs[KNOB9] = synth.presetVoice; //NOT -1
 }
 
 // Loads a preset voice.
@@ -1962,6 +2112,10 @@ __attribute__((always_inline)) inline void savePresetVoice(uint8_t bank, uint8_t
         presetVoice[b][voice][i][n++]= operators[i].adsr.level[3];
     }
 }
+
+
+
+
 __attribute__((always_inline)) inline void updateDisplay()
 {
   updatingDisplay = true;
@@ -1974,8 +2128,8 @@ __attribute__((always_inline)) inline void updateDisplay()
   display.setCursor(0,n++*font_height);
   display.printf("ALG: %-4d  VOL: %-4d%% ", synth.algorithm, map(synth.volume, 0, MAX_ANALOG_VALUE, 0, 100));    
   display.setCursor(0,n++*font_height);
-  display.printf("MOD: %s", knobsControlDisp[synth.knobs.control]);
-  if (synth.knobs.control == PARAMETERS || synth.knobs.control == ADSR) {
+  display.printf("MOD: %s", knobsControlDisp[synth.control]);
+  if (synth.control == PARAMETERS || synth.control == ADSR) {
     display.printf(" %-2d %s", o, sourcesDisp[operators[o].src_sel]);
   } 
   display.setCursor(0,n++*font_height);
@@ -1984,7 +2138,7 @@ __attribute__((always_inline)) inline void updateDisplay()
     operators[o].levelScaling.sign[0],
     levelScalingFunctionDisp[operators[o].levelScaling.function[1]],
     operators[o].levelScaling.sign[1]);
-  if (synth.knobs.control == PARAMETERS) {
+  if (synth.control == PARAMETERS) {
     display.setCursor(0,n++*font_height);
     display.printf("RAT: %-4d  LVL: %-4d", operators[o].ratio, operators[o].level);
     display.setCursor(0,n++*font_height);      
@@ -1997,7 +2151,7 @@ __attribute__((always_inline)) inline void updateDisplay()
     display.setCursor(0,n++*font_height); 
     display.printf("BPK: %-4d   ",  operators[o].levelScaling.breakPointKey);
     }
-  if (synth.knobs.control == ADSR) {
+  if (synth.control == ADSR) {
         display.setCursor(0,n++*font_height);
         display.printf("RA1: %-4d LV1: %-4d",operators[o].adsr.rate[0], operators[o].adsr.level[0]);
         display.setCursor(0,n++*font_height);
@@ -2006,6 +2160,25 @@ __attribute__((always_inline)) inline void updateDisplay()
         display.printf("RA3: %-4d LV3: %-4d",operators[o].adsr.rate[2], operators[o].adsr.level[2]);
         display.setCursor(0,n++*font_height);
         display.printf("RA4: %-4d LV4: %-4d",operators[o].adsr.rate[3], operators[o].adsr.level[3]);
+  }
+  if (synth.control == STANDBY) {
+     n+= 2;
+     display.setCursor(0,n*font_height);
+     if (standbyMessage) display.printf(standbyMessage);
+  }
+  if (synth.control == SAVE) {
+     n+=2;
+     display.setCursor(0,n*font_height);
+     display.printf("Select voice to save.");
+  }
+  if (synth.control == MENU) {
+     for (int x = 0; x < MENU_LINES ; x++) {
+      display.setCursor(0,n++*font_height);
+      if(x+windowStart < MENU_ITEMS) { 
+        display.printf(theMenu[x + windowStart].line, *theMenu[x].data);
+        if (x+windowStart == selectedItem) display.write (0xab);
+      }
+     }  
   }
   display.sendBuffer();
   updatingDisplay = false;
@@ -2022,8 +2195,8 @@ __attribute__((always_inline)) inline void updateRemoteKnobs()
   
    MIDI1.sendControlChange(synth.channel, VOLUME_CC_MSB, synth.volume >>7);    
    MIDI1.sendControlChange(synth.channel, VOLUME_CC_LSB, synth.volume &0x7f);    
-  //MIDI1.sendControlChange(synth.channel, GP5_CC_MSB, (synth.knobs.control == ADSR) *127);
-  if (synth.knobs.control == PARAMETERS || synth.knobs.control == ADSR) {
+  //MIDI1.sendControlChange(synth.channel, GP5_CC_MSB, (synth.control == ADSR) *127);
+  if (synth.control == PARAMETERS || synth.control == ADSR) {
     delay(DEL);
     MIDI1.sendControlChange(GP1_CC_MSB, o, synth.channel);
     delay(DEL);
@@ -2034,7 +2207,7 @@ __attribute__((always_inline)) inline void updateRemoteKnobs()
   MIDI1.sendControlChange(GP2_CC_MSB, lsToCycle(0), synth.channel);
   delay(DEL);
   MIDI1.sendControlChange(GP3_CC_MSB, lsToCycle(1), synth.channel);
-  if (synth.knobs.control == PARAMETERS) {
+  if (synth.control == PARAMETERS) {
     delay(DEL);
     MIDI1.sendControlChange(U1_CC_MSB, operators[o].ratio >> 7 & 0x7f, synth.channel);
     delay(DEL);
@@ -2069,7 +2242,7 @@ __attribute__((always_inline)) inline void updateRemoteKnobs()
     MIDI1.sendControlChange(U8_CC_LSB, operators[o].levelScaling.breakPointKey, synth.channel);
     delay(DEL);
  }
-  if (synth.knobs.control == ADSR) {
+  if (synth.control == ADSR) {
      delay(DEL);
        MIDI1.sendControlChange(U1_CC_MSB, (operators[o].adsr.rate[0] >> 7) & 0x7f, synth.channel);
     delay(DEL);
