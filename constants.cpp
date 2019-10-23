@@ -3,7 +3,7 @@
 
 char * adsrParamDisp [] = {"ATK", "DEC", "SUS", "REL"};
 char * levelScalingFunctionDisp [] = {"OFF", "LIN", "EXP"};
-char * knobsControlDisp[] = {"STBY", "ADSR", "PARM",  "MENU", "SAVE"};
+char * knobsControlDisp[] = {"STBY", "ADSR", "PARM",  "MENU", "SAVE", "EDIT"};
 
 const uint8_t feedBackOsc [NUM_ALGORITHMS] = 
     {5,1,5,3,5,4,5,4,1,2,4,1,5,4,4,5,1,3,5,2,2,5,5,5,5,5,2,4,5,4,5,5};

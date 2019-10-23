@@ -1,6 +1,8 @@
 #include <ArduinoJson.h>
-
+#include <EEPROM.h>
 #include <MIDI.h>
+#include <TimeLib.h>
+
 #ifdef WIFI
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
@@ -136,36 +138,63 @@ Adafruit_MCP23017 expander;
 Adafruit_MCP23017 expander2;
 Adafruit_MCP23017 expander3;
 
-
+void eepromUpdate(void);
 
 #define MENU_LINES 5
-#define MENU_ITEMS 7
+#define MENU_ITEMS 2
 
-typedef struct {
+typedef struct menu_struct_t {
   char * line;
+  struct menu_struct_t * subMenu;
+  uint8_t subMenuLength;
   uint8_t * data;  
+  uint8_t minval;
+  uint8_t maxval;
+  char ** textdisp;
+  void (*savefunc)();
 } menu_t;
 
-menu_t theMenu [MENU_ITEMS] = { 
-  {"MIDI CHAN: %-2d", &synth.channel},
-  {"OP0 SRC  : %-2d", &operators[0].src_sel},
-  {"OP1 SRC  : %-2d", &operators[1].src_sel},
-  {"OP2 SRC  : %-2d", &operators[2].src_sel},
-  {"OP3 SRC  : %-2d", &operators[3].src_sel},
-  {"OP4 SRC  : %-2d", &operators[4].src_sel},
-  {"OP5 SRC  : %-2d", &operators[5].src_sel},
+
+menu_t midiMenu[] = {
+  {"MIDI CHAN: %-2d", NULL, 0, &synth.channel, 1, 31, NULL, eepromUpdate},
+};
+
+menu_t opMenu [] = { 
+
+  {"OP0 SRC: %-2d %s", NULL, 0, &operators[0].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
+  {"OP1 SRC: %-2d %s", NULL, 0, &operators[1].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
+  {"OP2 SRC: %-2d %s", NULL, 0, &operators[2].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
+  {"OP3 SRC: %-2d %s", NULL, 0, &operators[3].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
+  {"OP4 SRC: %-2d %s", NULL, 0, &operators[4].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
+  {"OP5 SRC: %-2d %s", NULL, 0, &operators[5].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
 
 };
 
+
+menu_t theMenu [] = { 
+  {"MIDI     ", midiMenu, 1, NULL, 0, 0},
+  {"OPERATOR ", opMenu, 6, NULL, 0, 0},
+};
+
+#define MENU_DEPTH 3
+
+menu_t * currentMenu = theMenu;
+menu_t * prevMenu[MENU_DEPTH] = {NULL, NULL, NULL};
+uint8_t currentMenuItems = MENU_ITEMS;
+uint8_t prevMenuItems[MENU_DEPTH] = {0, 0, 0};
+uint8_t prevSelectedItem[MENU_DEPTH] = {0, 0, 0};
+int prevWindowStart[MENU_DEPTH] = {0, 0, 0};
 int windowStart = 0;
 int selectedItem = 0;
-
+int menuStack = 0;
 
 int NumVoices[NUM_BANKS] = {0, 0};
 int NumParams = 0;
 char ** patchNames[NUM_BANKS];
 uint8_t *  presetAlgorithm[NUM_BANKS];
 int16_t *** presetVoice[NUM_BANKS];
+
+int NumBanks = 1;
 
 #define DISPLAY_CS 9
 #define DISPLAY_DC 15
@@ -207,6 +236,16 @@ volatile bool isConnected = false;
 
 char * standbyMessage = NULL;
 bool gotWifi = false;
+
+bool sdEnabled = false;
+
+volatile bool didInit = false;
+
+bool eepromWrite = false;
+
+elapsedMillis loopMillis;
+elapsedMillis standbyMillis;
+elapsedMillis eepromMillis;
 
 void handleencbtn() {
   
@@ -434,7 +473,6 @@ void setup_encoders()
 
 }
 
-
 void setDefaultVoice() 
 {
   NumVoices[0] = PRESET_VOICES;
@@ -580,6 +618,118 @@ void deallocate_presets(uint8_t bank)
   patchNames[bank] = NULL;
 }
 
+void read_wavetable_file(uint8_t src, char * fname) 
+{   
+    Serial.println("Read wavetable");    
+    File f = SD.open(fname, FILE_READ);
+    if (!f) {
+      Serial.println("Unable to open wavetable file");
+      return;
+    }
+  DynamicJsonDocument  doc(7000);
+
+  // Parse the root object
+  DeserializationError error = deserializeJson(doc, f);
+  f.close();
+  if (error) {
+    Serial.println(F("Failed to  read wavetable file"));
+    Serial.println(error.c_str());
+    return;
+  }
+  
+  int ssiz = doc["WAVE_TABLE_SIZE"];
+  if (ssiz != SINE_TABLE_SIZE) {
+    Serial.println("wave table size mismatch");
+    return;  
+  }
+
+  int16_t * newsrc = new int16_t[ssiz];
+  
+  for (int s = 0; s < ssiz; s++) {
+    newsrc[s] = doc["wavetable"][s];
+  }
+  sources[src] = newsrc;
+  Serial.println("Read source wave table done");
+  
+}
+
+void build_wavetable_file(uint8_t src, char *fname)
+{
+    DynamicJsonDocument  doc(5000);
+    doc["WAVE_TABLE_SIZE"] = SINE_TABLE_SIZE;
+    JsonArray  ar = doc.createNestedArray("wavetable");
+    for (int s = 0; s < SINE_TABLE_SIZE; s++) {
+       ar.add(sources[src][s]);
+    }
+  SD.remove(fname);
+  File f = SD.open(fname, FILE_WRITE);
+  if (!f) {
+      Serial.println("Unable to open wavetable file for writing");
+      return;
+  }
+  f.seek(0);
+  serializeJsonPretty(doc, f);
+  f.close();
+}
+
+void WriteEEPROM()
+{
+
+      uint8_t cksum = 0;
+      EEPROM.write(0, 1);
+      EEPROM.write(1, synth.channel);
+      cksum = 1 + synth.channel;
+      EEPROM.write(2, cksum);
+}
+
+void WriteDefaultEEPROM()
+{
+      synth.channel = 1;
+      WriteEEPROM();
+}
+
+void ReadEEPROM ()
+{
+   uint8_t ver = EEPROM.read(0);
+   if (ver != 1) {
+      WriteDefaultEEPROM();
+   }
+   synth.channel = EEPROM.read(1);
+   uint8_t cksum = EEPROM.read(2);
+   uint8_t newcksum = synth.channel + 1;
+   if (newcksum != cksum) {
+      WriteDefaultEEPROM();
+   }
+}
+
+
+
+void eepromUpdate() 
+{
+  eepromWrite = true;
+  eepromMillis = 0;
+}
+
+//------------------------------------------------------------------------------
+// call back for file timestamps
+void dateTime(uint16_t* date, uint16_t* time) {
+ time_t current = now();
+ //sprintf(timestamp, "%4d-%02d-%02d %02d:%02d:%02d  \n",year(t), month(t),day(t), hour(t),minute(t),second(t));
+ //Serial.println("yy");
+ //Serial.println(timestamp);
+ // return date using FAT_DATE macro to format fields
+ *date = FAT_DATE(year(current), month(current), day(current));
+
+ // return time using FAT_TIME macro to format fields
+ *time = FAT_TIME(hour(current), minute(current), second(current));
+}
+//-----------------------------------------------------------------------------
+
+time_t getTeensy3Time()
+{
+  return Teensy3Clock.get();
+}
+
 void setup()
 {
     // Sets the default values for some parameters.
@@ -592,6 +742,8 @@ void setup()
 #else
     Wire.begin();
 #endif
+    setSyncProvider(getTeensy3Time);
+
     //display.init();
     display.begin();
     display.clear();
@@ -612,11 +764,15 @@ void setup()
 #else
     Serial1.begin(31250);
 #endif
+   ReadEEPROM();
+    SdFile::dateTimeCallback(dateTime);
    digitalWrite(DISPLAY_CS, HIGH);
    if (!SD.begin(SD_CS_PIN)) {
       Serial.println("Can't open SD card");
       setDefaultVoice();
+      NumBanks = 1;
    } else {
+    sdEnabled = true;
     read_presets(0, "presets.jsn");
     if (SD.exists("user.jsn")) {
       Serial.println("readin user bank");
@@ -626,7 +782,13 @@ void setup()
       Serial.println("writing new user bank");
 
       build_Preset_file(USER_BANK, "user.jsn");
+
     }
+    //build_wavetable_file(0, "wav1.jsn");
+    read_wavetable_file(USER_WAVTABLE_1, "wav1.jsn");
+    read_wavetable_file(USER_WAVTABLE_1, "wav2.jsn");
+
+    NumBanks = NUM_BANKS;
    }
    digitalWrite(SD_CS_PIN, HIGH);
 
@@ -770,8 +932,6 @@ void reset()
     
 }
 
-volatile bool didInit = false;
-
 bool knobTriggered(int knob)
 {
           bool res =   knobChanged[knob];
@@ -848,11 +1008,11 @@ void restoreBankIfSave() {
           synth.bank = synth.prevBank;
           synth.presetVoice = synth.prevVoice;
           maxvals[KNOB9] = NumVoices[synth.bank] + 1;
+          minvals[KNOB9] = 0;
           knobs[KNOB9] = synth.presetVoice;
    }
 }
-elapsedMillis loopMillis;
-elapsedMillis standbyMillis;
+
 
 void setStandbyMessage(const char * msg)
 {
@@ -923,14 +1083,54 @@ void loop()
                     break;
                  case ADSR_BUTTON:
                     if (synth.control == MENU) {
-                      //Menu select logic goes here
                       if(longPress) {
-                        synth.control = STANDBY;
-                        knobs[KNOB9] = synth.presetVoice;
-                        maxvals[KNOB9] = NumVoices[synth.bank] + 1;
-                      } else {
-                        Serial.println ("Menu select not implemented");
+                          --menuStack;
+                          if (menuStack == 0) {
+                            synth.control = STANDBY;
+                            knobs[KNOB9] = synth.presetVoice;
+                            maxvals[KNOB9] = NumVoices[synth.bank] + 1;
+                            minvals[KNOB9] = 0;
+                          } else {
+                            currentMenu = prevMenu[menuStack];
+                            selectedItem = prevSelectedItem[menuStack];
+                            currentMenuItems = prevMenuItems[menuStack];
+                            windowStart = prevWindowStart[menuStack];
+                            knobs[KNOB9] = selectedItem;
+                            maxvals[KNOB9] = currentMenuItems-1;
+                            minvals[KNOB9] = 0;
+                          }
+                        } else {
+                          if (currentMenu[selectedItem].subMenu) {
+                            prevMenu[menuStack] = currentMenu;
+                            prevSelectedItem[menuStack] = selectedItem;
+                            prevMenuItems[menuStack] = currentMenuItems;
+                            prevWindowStart[menuStack] = windowStart;
+                            ++menuStack;
+                            currentMenuItems = currentMenu[selectedItem].subMenuLength;
+                            currentMenu = currentMenu[selectedItem].subMenu;
+                            windowStart = 0;
+                            selectedItem = 0;
+                            knobs[KNOB9] = 0;
+                            maxvals[KNOB9] = currentMenuItems-1;
+                            minvals[KNOB9] = 0;
+                          } else {
+                            synth.control = MENU_EDIT;
+                            knobs[KNOB9] = *currentMenu[selectedItem].data;
+                            maxvals[KNOB9] = currentMenu[selectedItem].maxval;
+                            minvals[KNOB9] =  currentMenu[selectedItem].minval;
+                          }
                       }
+                     } else if (synth.control == MENU_EDIT) {
+                        if (!longPress) {
+                          *currentMenu[selectedItem].data = knobs[KNOB9];
+                          if (currentMenu[selectedItem].savefunc) {
+                            currentMenu[selectedItem].savefunc();
+                          }
+                        }
+                        synth.control = MENU;
+                        knobs[KNOB9] = 0;
+                        maxvals[KNOB9] = currentMenuItems-1;
+                        minvals[KNOB9] = 0;
                      } else if (synth.control == SAVE) {
                         if (longPress) {
                           restoreBankIfSave();
@@ -945,9 +1145,12 @@ void loop()
                             setStandbyMessage("Discarded Changes...");
                         }else {
                           savePresetVoice(synth.bank, synth.presetVoice -1);
-                          digitalWrite(DISPLAY_CS, HIGH);
-                          build_Preset_file(USER_BANK, "user.jsn");
-                          digitalWrite(SD_CS_PIN, HIGH);
+                          if (sdEnabled) {
+                            digitalWrite(DISPLAY_CS, HIGH);
+                           
+                            build_Preset_file(USER_BANK, "user.jsn");
+                            digitalWrite(SD_CS_PIN, HIGH);
+                          }
                           synth.modified = false;
                           synth.control = STANDBY;
                           setStandbyMessage("Saved to User Bank...");
@@ -955,8 +1158,15 @@ void loop()
                      } else {
                       if (longPress) {
                         synth.control = MENU;
+                        prevMenu[menuStack] = currentMenu;
+                        prevSelectedItem[menuStack] = selectedItem;
+                        prevMenuItems[menuStack] = currentMenuItems;
+                        prevWindowStart[menuStack] = windowStart;
+                        ++menuStack;
                         knobs[KNOB9] = 0;
-                        maxvals[KNOB9] = MENU_ITEMS-1;
+                        maxvals[KNOB9] = currentMenuItems-1;
+                        minvals[KNOB9] = 0;
+                        
                       } else {
                         // Sets the knobs to change the ADSR values of an operator (increments with every press).
                         if (synth.control != ADSR)
@@ -993,6 +1203,7 @@ void loop()
                             synth.presetVoice = 1;
                             knobs[KNOB9] = synth.presetVoice;
                             maxvals[KNOB9] = NumVoices[synth.bank] + 1;
+                            minvals[KNOB9] = 0;
                         }
                     }
                     // Prints parameters to the serial monitor.
@@ -1138,11 +1349,11 @@ void loop()
               } else if ((selectedItem -windowStart) + 1> MENU_LINES) {
                 windowStart = selectedItem+1 -MENU_LINES;
               }
-              //0-4 window 0-6 menu window 0 selected 5
-              //
-  
               displayNeedsUpdating=true;
-           } else if (synth.modified  && synth.control != SAVE) {
+           } else if (synth.control == MENU_EDIT) {
+              //Do nothing
+           } else if (synth.modified  && synth.control != SAVE && NumBanks > 1) {
+          
              synth.prevBank = synth.bank;
              synth.prevVoice = synth.presetVoice; 
              synth.control = SAVE;
@@ -1152,25 +1363,29 @@ void loop()
              }
              knobs[KNOB9] = synth.presetVoice;
              maxvals[KNOB9] = NumVoices[synth.bank] +1;
+             minvals[KNOB9] = 0;
            } else {
              if (synth.control != SAVE) synth.control = STANDBY;
            
              if (knobs[KNOB9] == 0) {
-               if (synth.control != SAVE) {
-                if (synth.bank == 0) synth.bank = NUM_BANKS-1;
+               if (synth.control != SAVE ) {
+                if (synth.bank == 0) synth.bank = NumBanks-1;
                 else synth.bank--;
                }
                synth.presetVoice = NumVoices[synth.bank];
                knobs[KNOB9] = NumVoices[synth.bank];
                maxvals[KNOB9] = NumVoices[synth.bank] +1;
+               minvals[KNOB9] = 0;
              } else if (knobs[KNOB9] == NumVoices[synth.bank] +1) {
                if (synth.control != SAVE) {
-                 if (synth.bank == NUM_BANKS -1) synth.bank = 0;
+                 if (synth.bank == NumBanks -1) synth.bank = 0;
                  else synth.bank++;
                }
                synth.presetVoice = 1;
                knobs[KNOB9] = 1;
                maxvals[KNOB9] = NumVoices[synth.bank] +1;
+               minvals[KNOB9] = 0;
+
              } else {
                synth.presetVoice = knobs[KNOB9];
              }
@@ -1229,6 +1444,10 @@ void loop()
     if (standbyMessage && standbyMillis > 5000) {
       standbyMessage = NULL;
       displayNeedsUpdating = true;
+    }
+    if (eepromWrite && eepromMillis > 50) {
+      WriteEEPROM();
+      eepromWrite = false;
     }
 }
 
@@ -1417,7 +1636,7 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
 
         case BANKSEL_CC_MSB: //bank select
           newbank = value;
-          if (newbank > NUM_BANKS -1) newbank = NUM_BANKS -1;
+          if (newbank > NumBanks -1) newbank = NumBanks -1;
             if (newbank != synth.bank) {
               synth.bank = newbank;
               //Serial.println(program);
@@ -2171,12 +2390,24 @@ __attribute__((always_inline)) inline void updateDisplay()
      display.setCursor(0,n*font_height);
      display.printf("Select voice to save.");
   }
-  if (synth.control == MENU) {
+  if (synth.control == MENU || synth.control == MENU_EDIT) {
      for (int x = 0; x < MENU_LINES ; x++) {
       display.setCursor(0,n++*font_height);
-      if(x+windowStart < MENU_ITEMS) { 
-        display.printf(theMenu[x + windowStart].line, *theMenu[x].data);
-        if (x+windowStart == selectedItem) display.write (0xab);
+      if(x+windowStart < currentMenuItems) {
+        char * prt = currentMenu[x + windowStart].line;
+        uint8_t data =  *currentMenu[x].data;
+        if (x+windowStart == selectedItem && synth.control == MENU_EDIT) {
+             data =  knobs[KNOB9];
+        }  
+        char * disp = "";
+        if (currentMenu[x + windowStart].textdisp) {
+          disp = currentMenu[x + windowStart].textdisp[data];
+        }
+        display.printf(prt, data, disp);
+        if (x+windowStart == selectedItem) {
+          
+           display.write (0xab);
+        } 
       }
      }  
   }
@@ -2283,6 +2514,8 @@ __attribute__((always_inline)) inline void updateRemoteKnobs()
 __attribute__((always_inline)) inline void printParameters()
 {
 
+    Serial.print("BANK ");
+    Serial.println(synth.bank);
     Serial.print("PATCH ");
     Serial.println(patchNames[synth.bank][synth.presetVoice -1]);
     Serial.print("ALGORITHM ");
@@ -2343,6 +2576,8 @@ __attribute__((always_inline)) inline void printParameters()
 
 void show_audio_load()
 {
+  time_t t = now();
+  Serial.printf("%4d-%02d-%02d %02d:%02d:%02d ",year(t), month(t),day(t), hour(t),minute(t),second(t));
   Serial.print(F("CPU: "));
   Serial.print(AudioProcessorUsage(), 2);
   Serial.print(F("%   CPU MAX: "));

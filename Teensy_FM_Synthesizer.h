@@ -33,6 +33,9 @@
 // Number of preset voices.
 #define PRESET_VOICES 1
 // Number of keys and their lowest and highest values. Sine table look-up steps were calculated for these notes only. See "doc/Sine Wave Table Steps.ods" for more info.
+#define USER_WAVTABLE_1 4
+#define USER_WAVTABLE_2 5
+
 #define NUM_KEYS 88
 #define LOWEST_KEY 21
 #define HIGHEST_KEY 108
@@ -188,7 +191,8 @@ enum knobsControl
     ADSR,
     PARAMETERS,
     MENU,
-    SAVE
+    SAVE,
+    MENU_EDIT
 };
 
 extern char * knobsControlDisp[];
