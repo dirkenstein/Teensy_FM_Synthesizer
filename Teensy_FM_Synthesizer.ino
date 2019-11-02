@@ -115,6 +115,7 @@ void ICACHE_RAM_ATTR envelopeHandler(void);
 #endif 
 
 #define SERIALMIDI
+#define MIDI_USB_HOST
 //#define APPLEMIDI
 
 #ifdef SERIALMIDI
@@ -133,6 +134,13 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 #ifdef APPLEMIDI
 APPLEMIDI_CREATE_INSTANCE(WiFiUDP, AppleMIDI); // see definition in AppleMidi_Defs.h
 #endif
+
+#ifdef MIDI_USB_HOST
+#include <USBHost_t36.h>
+USBHost usb_host;
+MIDIDevice midi_usb(usb_host);
+#endif
+
 
 Adafruit_MCP23017 expander;
 Adafruit_MCP23017 expander2;
@@ -187,6 +195,9 @@ int prevWindowStart[MENU_DEPTH] = {0, 0, 0};
 int windowStart = 0;
 int selectedItem = 0;
 int menuStack = 0;
+
+int lastUpdated = 0;
+int savedLastUpdated = 0;
 
 int NumVoices[NUM_BANKS] = {0, 0};
 int NumParams = 0;
@@ -857,7 +868,16 @@ void setup()
     MIDI.setHandleControlChange(midiControlChangeHandler);
     MIDI.begin(MIDI_IN_CHANNEL); 
 #endif
-
+#ifdef MIDI_USB_HOST
+  usb_host.begin();
+  midi_usb.setHandleNoteOn(midiNoteOnHandler);
+  midi_usb.setHandleNoteOff(midiNoteOffHandler);
+  midi_usb.setHandleControlChange(midiControlChangeHandler);
+  midi_usb.setHandlePitchChange(midiPitchBendHandler);
+  midi_usb.setHandleProgramChange(midiProgramChangeHandler);
+  midi_usb.setHandleControlChange(midiControlChangeHandler);
+  Serial.println(F("MIDI_DEVICE_USB_HOST enabled."));
+#endif
 #ifdef APPLEMIDI
     AppleMIDI.begin("espFM"); 
     AppleMIDI.OnConnected(OnAppleMidiConnected);
@@ -1041,6 +1061,7 @@ void loop()
         updateKnobsParameters(synth.selectedOperator);
         knobsNeedUpdating = true;
         displayNeedsUpdating = true;
+        lastUpdated = 3;
       }
     }
 
@@ -1066,7 +1087,8 @@ void loop()
                         synth.algorithm = 0;
                     else
                       ++synth.algorithm;
-                    synth.modified = true;
+                      lastUpdated = 1;
+                      synth.modified = true;
   #ifdef ESP8266
                     i2s_set_callback(DACAlgorithmsHandler[synth.algorithm]);
   #endif
@@ -1074,11 +1096,15 @@ void loop()
                  case LEVEL_SCALING_LEFT_BUTTON:
                     restoreBankIfSave();
                     levelScalingCycle(0);
+                    lastUpdated =5;
+
                      synth.modified = true;
                     break;
                  case LEVEL_SCALING_RIGHT_BUTTON:
                     restoreBankIfSave();
                     levelScalingCycle(1);
+                    lastUpdated = 6;
+
                     synth.modified = true;
                     break;
                  case ADSR_BUTTON:
@@ -1090,6 +1116,8 @@ void loop()
                             knobs[KNOB9] = synth.presetVoice;
                             maxvals[KNOB9] = NumVoices[synth.bank] + 1;
                             minvals[KNOB9] = 0;
+                            lastUpdated = savedLastUpdated;
+
                           } else {
                             currentMenu = prevMenu[menuStack];
                             selectedItem = prevSelectedItem[menuStack];
@@ -1143,6 +1171,7 @@ void loop()
                             synth.modified = false;
                             loadPresetVoice(synth.bank, synth.presetVoice -1);
                             setStandbyMessage("Discarded Changes...");
+                            lastUpdated = 0;
                         }else {
                           savePresetVoice(synth.bank, synth.presetVoice -1);
                           if (sdEnabled) {
@@ -1154,6 +1183,7 @@ void loop()
                           synth.modified = false;
                           synth.control = STANDBY;
                           setStandbyMessage("Saved to User Bank...");
+                          lastUpdated = 0;
                         }
                      } else {
                       if (longPress) {
@@ -1166,7 +1196,8 @@ void loop()
                         knobs[KNOB9] = 0;
                         maxvals[KNOB9] = currentMenuItems-1;
                         minvals[KNOB9] = 0;
-                        
+                        savedLastUpdated = lastUpdated;
+                        lastUpdated = 3;
                       } else {
                         // Sets the knobs to change the ADSR values of an operator (increments with every press).
                         if (synth.control != ADSR)
@@ -1181,6 +1212,7 @@ void loop()
                             synth.selectedOperator = 0;        
                         updateKnobsParameters(synth.selectedOperator);
                         knobsNeedUpdating = true;
+                        lastUpdated = 3;
                        }
                     }                
                     break;
@@ -1227,6 +1259,7 @@ void loop()
         {
             operators[synth.selectedOperator].ratio = KNOBMAP(knobs[KNOB0]);
             synth.modified = true;
+            lastUpdated = 7;
         }
 
 
@@ -1234,12 +1267,15 @@ void loop()
         {
             operators[synth.selectedOperator].level =  KNOBMAP(knobs[KNOB1]);
             synth.modified = true;
+            lastUpdated = 8;
+
        }
 
         if (knobTriggered(KNOB2))
         {
             operators[synth.selectedOperator].feedback = KNOBMAP(knobs[KNOB2]);
             synth.modified = true;
+            lastUpdated = 9;
         }
 
       
@@ -1247,12 +1283,15 @@ void loop()
         {
             operators[synth.selectedOperator].velocity = knobs[KNOB3];
             synth.modified = true;
+            lastUpdated = 10;
+
        }
 
         if (knobTriggered(KNOB4))
         {
             operators[synth.selectedOperator].rateScaling = knobs[KNOB4];
             synth.modified = true;
+            lastUpdated = 11;
        }
         
 
@@ -1260,6 +1299,7 @@ void loop()
         {
             operators[synth.selectedOperator].levelScaling.depth[0] = KNOBMAP(knobs[KNOB5]);
              synth.modified = true;
+            lastUpdated = 12;
        }
 
 
@@ -1267,12 +1307,14 @@ void loop()
         {
             operators[synth.selectedOperator].levelScaling.breakPointKey = knobs[KNOB6];
             synth.modified = true;
+            lastUpdated = 14;
         }
 
         if (knobTriggered(KNOB7))
         {
             operators[synth.selectedOperator].levelScaling.depth[1] = KNOBMAP(knobs[KNOB7]);
             synth.modified = true;
+            lastUpdated = 13;
        }
 
         
@@ -1288,18 +1330,24 @@ void loop()
         {
             operators[synth.selectedOperator].adsr.level[3] = KNOBMAP(knobs[KNOB0]);
             synth.modified = true;
+            lastUpdated = 14;
+
         }
 
         if (knobTriggered(KNOB1)) 
         {
             operators[synth.selectedOperator].adsr.rate[0] =  REVKNOBMAP(knobs[KNOB1]);
             synth.modified = true;
+            lastUpdated = 7;
+
         }
 
         if (knobTriggered(KNOB2))
         {
             operators[synth.selectedOperator].adsr.level[0] = KNOBMAP(knobs[KNOB2]);
             synth.modified = true;
+            lastUpdated = 8;
+
         }
 
 
@@ -1307,12 +1355,16 @@ void loop()
         {
             operators[synth.selectedOperator].adsr.rate[1] = REVKNOBMAP(knobs[KNOB3]);
             synth.modified = true;
+            lastUpdated = 9;
+
         }
 
         if (knobTriggered(KNOB4)) 
         {
             operators[synth.selectedOperator].adsr.level[1] = KNOBMAP(knobs[KNOB4]);
             synth.modified = true;
+            lastUpdated = 10;
+
         }
 
 
@@ -1320,6 +1372,7 @@ void loop()
         {
             operators[synth.selectedOperator].adsr.rate[2] = REVKNOBMAP(knobs[KNOB5]);
             synth.modified = true;
+            lastUpdated = 11;
         }
 
 
@@ -1327,17 +1380,21 @@ void loop()
         {
             operators[synth.selectedOperator].adsr.level[2] = KNOBMAP(knobs[KNOB6]);
              synth.modified = true;
+             lastUpdated = 12;
        }
 
         if (knobTriggered(KNOB7)) 
         {
             operators[synth.selectedOperator].adsr.rate[3] =  REVKNOBMAP(knobs[KNOB7]);
             synth.modified = true;
+            lastUpdated = 13;
+
         }
     }
     // Scans for the overall volume.
     if (knobTriggered(KNOB8))
     {
+          lastUpdated = 2;
           synth.volume = KNOBMAP(knobs[KNOB8]);
     }
     if (knobTriggered(KNOB9)) 
@@ -1391,7 +1448,7 @@ void loop()
              }
              if (synth.control != SAVE) {
               loadPresetVoice(synth.bank, synth.presetVoice -1);
-             
+              lastUpdated = 0;
               synth.playMode = true;
               printParameters();
             }
@@ -1409,8 +1466,10 @@ void loop()
       didInit = true;
     }
     MIDI1.read();
-
-
+#ifdef MIDI_USB_HOST
+    usb_host.Task();
+    midi_usb.read();
+#endif
     if (displayNeedsUpdating && millis() - lastDisplayUpdate > 100) {
       updateDisplay();
       lastDisplayUpdate = millis();
@@ -2259,6 +2318,7 @@ __attribute__((always_inline)) inline void updateKnobsParameters(uint8_t operato
     }
     knobs[KNOB8] = PARAMMAP(synth.volume);
     knobs[KNOB9] = synth.presetVoice; //NOT -1
+    lastUpdated = 0;
 }
 
 // Loads a preset voice.
@@ -2333,53 +2393,115 @@ __attribute__((always_inline)) inline void savePresetVoice(uint8_t bank, uint8_t
 }
 
 
-
-
+int lup = 1;
+void updateHighlight()
+{
+  if (lastUpdated == lup++) display.setDrawColor(0);
+  else display.setDrawColor(1);
+}
+void nonHighlightSpace(char * spc)
+{
+  display.setDrawColor(1);
+  display.printf(spc);
+}
 __attribute__((always_inline)) inline void updateDisplay()
 {
   updatingDisplay = true;
   const uint8_t font_height = 7;
   int o = synth.selectedOperator;
   int n = 0;
+  lup = 1;
   display.clearBuffer();
   display.setCursor(0,n++*font_height);
+  
   display.printf("PATCH: %02d %s", synth.presetVoice, patchNames[synth.bank][synth.presetVoice -1]);    
+  
+  display.setCursor(0,n++*font_height);  
+  updateHighlight();
+  display.printf("ALG: %-4d",  synth.algorithm);
+  nonHighlightSpace(" ");
+  updateHighlight();
+  display.printf("VOL: %-4d%% ", map(synth.volume, 0, MAX_ANALOG_VALUE, 0, 100));    
   display.setCursor(0,n++*font_height);
-  display.printf("ALG: %-4d  VOL: %-4d%% ", synth.algorithm, map(synth.volume, 0, MAX_ANALOG_VALUE, 0, 100));    
-  display.setCursor(0,n++*font_height);
-  display.printf("MOD: %s", knobsControlDisp[synth.control]);
+  display.setDrawColor(1);
+  display.printf("MOD: ");
   if (synth.control == PARAMETERS || synth.control == ADSR) {
-    display.printf(" %-2d %s", o, sourcesDisp[operators[o].src_sel]);
-  } 
+      updateHighlight();
+      display.printf("%s %-2d", knobsControlDisp[synth.control], o);
+      nonHighlightSpace(" ");
+      updateHighlight();
+      display.printf("%s", sourcesDisp[operators[o].src_sel]);
+  } else {
+      updateHighlight();
+      display.printf("%s",  knobsControlDisp[synth.control]);
+      updateHighlight();
+
+  }
   display.setCursor(0,n++*font_height);
-  display.printf("LSL: %s%-2d LSR: %s%-2d",
-    levelScalingFunctionDisp[operators[o].levelScaling.function[0]],
-    operators[o].levelScaling.sign[0],
-    levelScalingFunctionDisp[operators[o].levelScaling.function[1]],
+  updateHighlight();
+  display.printf("LSL: %s%-2d", levelScalingFunctionDisp[operators[o].levelScaling.function[0]],
+    operators[o].levelScaling.sign[0]);
+  nonHighlightSpace(" ");
+  updateHighlight();
+  display.printf("LSR: %s%-2d",levelScalingFunctionDisp[operators[o].levelScaling.function[1]],
     operators[o].levelScaling.sign[1]);
+    
+    
   if (synth.control == PARAMETERS) {
     display.setCursor(0,n++*font_height);
-    display.printf("RAT: %-4d  LVL: %-4d", operators[o].ratio, operators[o].level);
+    updateHighlight();
+    display.printf("RAT: %-4d",  operators[o].ratio);
+    nonHighlightSpace(" ");
+    updateHighlight();
+    display.printf("LVL: %-4d",  operators[o].level);
     display.setCursor(0,n++*font_height);      
-    display.printf("FB : %-4d  VEL: %-4d", operators[o].feedback, operators[o].velocity);
+    updateHighlight();
+    display.printf("FB : %-4d", operators[o].feedback);
+    nonHighlightSpace(" ");
+    updateHighlight();
+    display.printf("VEL: %-4d", operators[o].velocity);
     display.setCursor(0, n++*font_height); 
+    updateHighlight();
     display.printf("RS : %-4d", operators[o].rateScaling);    
     display.setCursor(0, n++*font_height); 
-    display.printf("LSD: %-4d  RSD %-4d", operators[o].levelScaling.depth[0],  
-          operators[o].levelScaling.depth[1]);
+    updateHighlight();
+    display.printf("LSD: %-4d", operators[o].levelScaling.depth[0]);
+    nonHighlightSpace(" ");
+    updateHighlight();
+    display.printf("RSD %-4d",operators[o].levelScaling.depth[1]);
     display.setCursor(0,n++*font_height); 
-    display.printf("BPK: %-4d   ",  operators[o].levelScaling.breakPointKey);
-    }
+    updateHighlight();
+    display.printf("BPK: %-4d",  operators[o].levelScaling.breakPointKey);
+    nonHighlightSpace("   ");
+
+  }
   if (synth.control == ADSR) {
         display.setCursor(0,n++*font_height);
-        display.printf("RA1: %-4d LV1: %-4d",operators[o].adsr.rate[0], operators[o].adsr.level[0]);
+        updateHighlight();
+        display.printf("RA1: %-4d", operators[o].adsr.rate[0]);
+        nonHighlightSpace(" ");
+        updateHighlight();
+        display.printf("LV1: %-4d", operators[o].adsr.level[0]);
         display.setCursor(0,n++*font_height);
-        display.printf("RA2: %-4d LV2: %-4d",operators[o].adsr.rate[1],operators[o].adsr.level[1]);
+        updateHighlight();
+        display.printf("RA2: %-4d", operators[o].adsr.rate[1]);
+        nonHighlightSpace(" ");
+        updateHighlight();
+        display.printf("LV2: %-4d",operators[o].adsr.level[1]);
         display.setCursor(0,n++*font_height);
-        display.printf("RA3: %-4d LV3: %-4d",operators[o].adsr.rate[2], operators[o].adsr.level[2]);
+        updateHighlight();
+        display.printf("RA3: %-4d",operators[o].adsr.rate[2]);
+        nonHighlightSpace(" ");
+        updateHighlight();
+        display.printf("LV3: %-4d", operators[o].adsr.level[2]);
         display.setCursor(0,n++*font_height);
-        display.printf("RA4: %-4d LV4: %-4d",operators[o].adsr.rate[3], operators[o].adsr.level[3]);
+        updateHighlight();
+        display.printf("RA4: %-4d", operators[o].adsr.rate[3]);
+        nonHighlightSpace(" ");
+        updateHighlight();
+        display.printf("LV4: %-4d", operators[o].adsr.level[3]);
   }
+  display.setDrawColor(1);
   if (synth.control == STANDBY) {
      n+= 2;
      display.setCursor(0,n*font_height);

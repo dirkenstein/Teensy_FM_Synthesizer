@@ -1,7 +1,7 @@
 #include <stdint.h>
 
 // Maximum number of notes that can be played. Last note priority.
-#define MAX_POLYPHONY 6
+#define MAX_POLYPHONY 16
 // Diference to account for when comparing an old parameter value with a new one obtained by the knobs (to see if the value should be updated).
 //#define EPSILON 50
 #define EPSILON 5
