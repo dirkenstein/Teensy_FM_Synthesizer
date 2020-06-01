@@ -3,8 +3,7 @@
 // Maximum number of notes that can be played. Last note priority.
 #define MAX_POLYPHONY 16
 // Diference to account for when comparing an old parameter value with a new one obtained by the knobs (to see if the value should be updated).
-//#define EPSILON 50
-#define EPSILON 5
+
 // Bits to shift when applying the pitch bend (fixed point arithmetic).
 #define PITCH_BEND_SHIFT 13
 // Fixed point value for one unit in the pitch bend increments.
@@ -113,9 +112,12 @@
 #define ADSR_BUTTON 9
 // Pin for the button to play the preset voices.
 #define PRESET_BUTTON 20 //Not used
+
+#define MENU_BUTTON 10
+
 // Pins for the knobs.
-#define MAX_KNOBS 10
-#define MAX_BUTTONS 10
+#define MAX_KNOBS 14
+#define MAX_BUTTONS 14
 #define KNOB0 0
 #define KNOB1 1
 #define KNOB2 2
@@ -126,6 +128,15 @@
 #define KNOB7 7
 #define KNOB8 8
 #define KNOB9 9
+#define KNOB10 10
+#define KNOB11 11
+#define KNOB12 12
+#define KNOB13 13
+
+#define VOLUME_KNOB KNOB11
+#define ALG_KNOB KNOB8
+#define PRESET_KNOB KNOB9
+#define MENU_KNOB KNOB10
 #define LONG_PRESS_TIME 500
 #define REALLY_LONG_PRESS_TIME 2000
 
@@ -150,11 +161,11 @@
 #define NUM_VOICE_PARAMS 22
 
 // Preset voices parameters for the operators.
-extern int16_t default_presetVoice[PRESET_VOICES][NUM_OPERATORS][NUM_VOICE_PARAMS];
+extern const int16_t default_presetVoice[PRESET_VOICES][NUM_OPERATORS][NUM_VOICE_PARAMS];
 // Preset voices algorithms.
-extern uint8_t default_presetAlgorithm[PRESET_VOICES];
+extern const uint8_t default_presetAlgorithm[PRESET_VOICES];
 
-extern char * default_patchNames[PRESET_VOICES];
+extern const char * default_patchNames[PRESET_VOICES];
 
 #define NUM_BANKS 2
 #define USER_BANK 1
@@ -195,7 +206,7 @@ enum knobsControl
     MENU_EDIT
 };
 
-extern char * knobsControlDisp[];
+extern const char * knobsControlDisp[];
 
 // Enum to define the operators keyboard level scaling function.
 enum levelScalingFunction_e
@@ -205,7 +216,7 @@ enum levelScalingFunction_e
     EXPONENTIAL
 };
 
-extern char * levelScalingFunctionDisp [];
+extern const char * levelScalingFunctionDisp [];
 
 // Enum to define the ADSR envelope parameters.
 enum adsrParameters_e
@@ -216,7 +227,7 @@ enum adsrParameters_e
     RRELEASE
 };
 
-extern char * adsrParamDisp [];
+extern const char * adsrParamDisp [];
 
 
 // Typedef to know the key to note index relation.

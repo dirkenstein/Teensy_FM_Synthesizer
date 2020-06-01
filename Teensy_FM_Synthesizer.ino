@@ -18,6 +18,8 @@
 
 #include <SD.h>
 
+
+
 #include "Teensy_FM_Synthesizer.h"
 #include <Wire.h>
 
@@ -115,7 +117,8 @@ void ICACHE_RAM_ATTR envelopeHandler(void);
 #endif 
 
 #define SERIALMIDI
-#define MIDI_USB_HOST
+//#define MIDI_USB_HOST
+#define USB_MIDI
 //#define APPLEMIDI
 
 #ifdef SERIALMIDI
@@ -135,6 +138,10 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 APPLEMIDI_CREATE_INSTANCE(WiFiUDP, AppleMIDI); // see definition in AppleMidi_Defs.h
 #endif
 
+#ifdef USB_MIDI
+#define MIDI2 usbMIDI
+#endif
+
 #ifdef MIDI_USB_HOST
 #include <USBHost_t36.h>
 USBHost usb_host;
@@ -152,13 +159,13 @@ void eepromUpdate(void);
 #define MENU_ITEMS 2
 
 typedef struct menu_struct_t {
-  char * line;
+  const char * line;
   struct menu_struct_t * subMenu;
   uint8_t subMenuLength;
   uint8_t * data;  
   uint8_t minval;
   uint8_t maxval;
-  char ** textdisp;
+  const char ** textdisp;
   void (*savefunc)();
 } menu_t;
 
@@ -167,7 +174,7 @@ menu_t midiMenu[] = {
   {"MIDI CHAN: %-2d", NULL, 0, &synth.channel, 1, 31, NULL, eepromUpdate},
 };
 
-menu_t opMenu [] = { 
+ menu_t opMenu [] = { 
 
   {"OP0 SRC: %-2d %s", NULL, 0, &operators[0].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
   {"OP1 SRC: %-2d %s", NULL, 0, &operators[1].src_sel, 0, MAX_SOURCES-1, sourcesDisp, NULL},
@@ -207,15 +214,17 @@ int16_t *** presetVoice[NUM_BANKS];
 
 int NumBanks = 1;
 
-#define DISPLAY_CS 9
+#define DISPLAY_CS 16
 #define DISPLAY_DC 15
 #define DISPLAY_RESET 14
 //#define DISPLAY_RESET U8X8_PIN_NONE
 //SSD1306_text display;
 //U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, DISPLAY_RESET);
 
-U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI display(U8G2_R0, /* cs=*/ DISPLAY_CS, /* dc=*/ DISPLAY_DC, /* reset=*/ DISPLAY_RESET);
-volatile int knobs[MAX_KNOBS] = {MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, 0, 0, MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, 0, MAX_DIGITAL_VALUE/2};
+//U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI display(U8G2_R0, /* cs=*/ DISPLAY_CS, /* dc=*/ DISPLAY_DC, /* reset=*/ DISPLAY_RESET);
+U8G2_SSD1309_128X64_NONAME0_F_4W_HW_SPI display(U8G2_R0, /* cs=*/ DISPLAY_CS, /* dc=*/ DISPLAY_DC, /* reset=*/ DISPLAY_RESET);
+
+volatile int knobs[MAX_KNOBS] = {MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, 0, 0, MAX_DIGITAL_VALUE/2, MAX_DIGITAL_VALUE/2, 0, MAX_DIGITAL_VALUE/2, 0, 0};
 
 #define NO_ENCODER_INTERRUPTS
 
@@ -231,6 +240,16 @@ volatile bool buttonsChanged[MAX_BUTTONS];
 uint32_t lastButtonChange[MAX_BUTTONS];
 uint32_t buttonChange[MAX_BUTTONS];
 
+
+int encmap [MAX_KNOBS] = {7, 8, 9, 4, 5, 10, 12, 0, 3 , 2, 13, 1, 11, 6};
+//int encmap [MAX_KNOBS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+int revencmap[MAX_KNOBS];
+int encrevmap[MAX_KNOBS] = {1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0};
+int btnmap [MAX_BUTTONS] = {10, 7, 1, 2, 4, 8, 9, 0, 6, 5, 11, 3, 12, 13};
+//int btnmap [MAX_BUTTONS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+int revbtnmap [MAX_BUTTONS];
+ 
+
 volatile bool knobChanged[MAX_KNOBS];
 
 const uint8_t stateMachineR [] = {2, 0, 1, 3};
@@ -245,14 +264,14 @@ volatile bool knobsNeedUpdating = false;
 uint32_t lastDisplayUpdate = 0;
 volatile bool isConnected = false;
 
-char * standbyMessage = NULL;
+const char * standbyMessage = NULL;
 bool gotWifi = false;
 
 bool sdEnabled = false;
 
 volatile bool didInit = false;
 
-bool eepromWrite = false;
+volatile bool eepromWrite = false;
 
 elapsedMillis loopMillis;
 elapsedMillis standbyMillis;
@@ -287,11 +306,12 @@ void handleencbtn() {
             //else bval = (pins3>>((6- (x/2)))) & 1;
             if (x < 7) bval = (pins4>>(x)) & 1;
             else bval = (pins5>>(x-7)) & 1;
-            if (bval != buttons[x]) {
-              buttonsChanged[x] = true;
-              buttons[x] = bval;
-              lastButtonChange[x] = buttonChange[x];
-              buttonChange[x] = inttime;
+            int y = revbtnmap[x];
+            if (bval != buttons[y]) {
+              buttonsChanged[y] = true;
+              buttons[y] = bval;
+              lastButtonChange[y] = buttonChange[y];
+              buttonChange[y] = inttime;
             }
           }
       //}
@@ -307,30 +327,30 @@ void handleencbtn() {
         //seq = (pins & 0x3<<(2*x)) >>(2*x); 
         if (x < 7) seq = ((pins0 & 1<<x) >>x) | (((pins1 & 1<<x) >>x) <<1);
         else seq = ((pins2 & 1<<(x-7)) >>(x-7)) | (((pins3 & 1<<(x-7)) >>(x-7)) <<1);
- 
-        if (seq != lastSeq[x]) {
+        int y = revencmap[x];
+        if (seq != lastSeq[y]) {
           //Serial.printf("enc %d : seq %d\n", x, seq);
-          if (stateMachineL[stateLPos[x]] == seq) {
-            stateLPos[x]++;
+          if (stateMachineL[stateLPos[y]] == seq) {
+            stateLPos[y]++;
           } else {
-            stateLPos[x] = 0;
+            stateLPos[y] = 0;
           }
-         if (stateMachineR[stateRPos[x]] == seq) {
-          stateRPos[x]++;
+         if (stateMachineR[stateRPos[y]] == seq) {
+          stateRPos[y]++;
           } else {
-            stateRPos[x] = 0;
+            stateRPos[y] = 0;
           }
           bool up = false;
           bool done = false;
-          if (stateLPos[x] == 4) {
+          if (stateLPos[y] == 4) {
             up = false;
             done = true;
           }
-          if (stateRPos[x] == 4) {
+          if (stateRPos[y] == 4) {
             if (done) {
               //Should never happen
-              stateRPos[x] = 0;
-              stateLPos[x] = 0;
+              stateRPos[y] = 0;
+              stateLPos[y] = 0;
               done = false;
             } else {
               up = true;
@@ -338,25 +358,25 @@ void handleencbtn() {
             }
           }
           if (done) {
-            stateRPos[x] = 0;
-            stateLPos[x] = 0;
-            uint32_t tdif = inttime - lastInt[x];
+            stateRPos[y] = 0;
+            stateLPos[y] = 0;
+            uint32_t tdif = inttime - lastInt[y];
             uint16_t stp = 1;
-            lastInt[x] = inttime;
+            lastInt[y] = inttime;
             if (tdif < 250) {
               stp = (250000/tdif)/1000;
               //stp = floor(spd);
             }
-            if (up) knobs[x]+= stp;
-            else knobs[x] -= stp;
-            if (knobs[x] > maxvals[x]) knobs[x] = maxvals[x];
-            if (knobs[x] < minvals[x]) knobs[x] = minvals[x];
-            knobChanged[x] = true;
+            if (up ^ encrevmap[y]) knobs[y]+= stp;
+            else knobs[y] -= stp;
+            if (knobs[y] > maxvals[y]) knobs[y] = maxvals[y];
+            if (knobs[y] < minvals[y]) knobs[y] = minvals[y];
+            knobChanged[y] = true;
             //Serial.print (x);
             //Serial.print(" : ");
             //Serial.println(knobs[x]);
         }
-        lastSeq[x] = seq;
+        lastSeq[y] = seq;
        }
       }
               //Serial.print("3");
@@ -366,6 +386,8 @@ void handleencbtn() {
      //expander2.readINTCAPAB();
 }
 
+#ifndef NO_ENCODER_INTERRUPTS
+
 void ISRgateway() {
   //Serial.print("X");
   if (gotInt) return;
@@ -373,6 +395,7 @@ void ISRgateway() {
   inttime = millis();
   
 }
+#endif 
 
 /*
  * 
@@ -398,6 +421,7 @@ void ISRgateway() {
 #endif
 
 #define SD_CS_PIN 10
+#define FLASH_CS_PIN 17
 
 void setup_encoders() 
 {
@@ -412,9 +436,17 @@ void setup_encoders()
         maxvals[x] = MAX_PARAMETERS_LEVEL;
         knobs[x] = 0;
       }
+      else if (x == ALG_KNOB) {
+        knobs[x] = synth.algorithm;
+        maxvals[x] = NUM_ALGORITHMS -1; //Not -1 
+      }
       else if (x == 9) {
         knobs[x] = 0; //Go to prev bank
         maxvals[x] = NumVoices[synth.bank] +1; //Not -1 
+      }
+      else if (x == VOLUME_KNOB) {
+        knobs[x] = PARAMMAP(synth.volume);
+        maxvals[x] = MAX_DIGITAL_VALUE; 
       }
       else {
         maxvals[x] = MAX_DIGITAL_VALUE;
@@ -426,6 +458,32 @@ void setup_encoders()
       stateLPos[x] = 0;
       stateRPos[x] = 0;
     }
+    for (int x = 0; x < MAX_KNOBS; x++) {
+      Serial.print(encmap[x]);
+      Serial.print(" ");
+    }
+    Serial.println();
+    for (int x = 0; x < MAX_KNOBS; x++) {
+      revencmap[encmap[x]] = x;
+    }
+    for (int x = 0; x < MAX_KNOBS; x++) {
+      Serial.print(revencmap[x]);
+      Serial.print(" ");
+    }
+    Serial.println();
+    for (int x = 0; x < MAX_BUTTONS; x++) {
+      Serial.print(btnmap[x]);
+      Serial.print(" ");
+    }
+    Serial.println();
+    for (int x = 0; x < MAX_BUTTONS; x++) {
+      revbtnmap[btnmap[x]] = x;
+    }
+    for (int x = 0; x < MAX_BUTTONS; x++) {
+      Serial.print(revbtnmap[x]);
+      Serial.print(" ");
+    }
+    Serial.println();
     expander.begin(7);
     expander2.begin(1);
     expander3.begin(0);
@@ -526,7 +584,7 @@ void createUserBank(int bank, int nvoices)
     }
   }
 }
-void read_presets(uint8_t bank, char * fname) 
+void read_presets(uint8_t bank, const char * fname) 
 {   
     Serial.println("Read presets");    
     File f = SD.open(fname, FILE_READ);
@@ -535,7 +593,7 @@ void read_presets(uint8_t bank, char * fname)
       setDefaultVoice();
       return;
     }
-  DynamicJsonDocument  doc(75000);
+  DynamicJsonDocument  doc(100000);
 
   // Parse the root object
   DeserializationError error = deserializeJson(doc, f);
@@ -581,9 +639,9 @@ void read_presets(uint8_t bank, char * fname)
   
 }
 
-void build_Preset_file(uint8_t bank, char *fname)
+void build_Preset_file(uint8_t bank, const char *fname)
 {
-    DynamicJsonDocument  doc(75000);
+    DynamicJsonDocument  doc(100000);
     doc["NUM_PRESET_VOICES"] = NumVoices[bank];
     doc["NUM_OPERATORS"] = NUM_OPERATORS;
     doc["NUM_PARAMS"] = NumParams;
@@ -629,7 +687,7 @@ void deallocate_presets(uint8_t bank)
   patchNames[bank] = NULL;
 }
 
-void read_wavetable_file(uint8_t src, char * fname) 
+void read_wavetable_file(uint8_t src, const char * fname) 
 {   
     Serial.println("Read wavetable");    
     File f = SD.open(fname, FILE_READ);
@@ -683,31 +741,41 @@ void build_wavetable_file(uint8_t src, char *fname)
   f.close();
 }
 
+static const uint8_t eeprom_version = 2; 
+
 void WriteEEPROM()
 {
-
       uint8_t cksum = 0;
-      EEPROM.write(0, 1);
+      uint8_t v1 =  synth.volume >> 8;
+      uint8_t v2 = synth.volume & 0xff;
+      EEPROM.write(0, eeprom_version);
       EEPROM.write(1, synth.channel);
-      cksum = 1 + synth.channel;
-      EEPROM.write(2, cksum);
+      EEPROM.write(2, v1);
+      EEPROM.write(3, v2);
+      cksum = eeprom_version + synth.channel + v1 + v2;
+      EEPROM.write(4, cksum);
 }
 
 void WriteDefaultEEPROM()
 {
+      Serial.println("Default EEPROM");
       synth.channel = 1;
+      synth.volume = MAX_ANALOG_VALUE/2;
       WriteEEPROM();
 }
 
 void ReadEEPROM ()
 {
    uint8_t ver = EEPROM.read(0);
-   if (ver != 1) {
+   if (ver != eeprom_version) {
       WriteDefaultEEPROM();
    }
    synth.channel = EEPROM.read(1);
-   uint8_t cksum = EEPROM.read(2);
-   uint8_t newcksum = synth.channel + 1;
+   uint8_t v1 = EEPROM.read(2);
+   uint8_t v2 = EEPROM.read(3);
+   synth.volume = (v1 << 8 | (uint16_t)v2);
+   uint8_t cksum = EEPROM.read(4);
+   uint8_t newcksum = synth.channel + v1 + v2 + eeprom_version;
    if (newcksum != cksum) {
       WriteDefaultEEPROM();
    }
@@ -715,14 +783,16 @@ void ReadEEPROM ()
 
 
 
-void eepromUpdate() 
+void eepromUpdate(void) 
 {
+  Serial.println("UpdEeprom");
   eepromWrite = true;
   eepromMillis = 0;
 }
 
 //------------------------------------------------------------------------------
 // call back for file timestamps
+
 void dateTime(uint16_t* date, uint16_t* time) {
  time_t current = now();
  //sprintf(timestamp, "%4d-%02d-%02d %02d:%02d:%02d  \n",year(t), month(t),day(t), hour(t),minute(t),second(t));
@@ -751,14 +821,23 @@ void setup()
     Serial.begin(115200);
     Wire.begin(SDA_PIN, SCL_PIN);
 #else
+    Serial.begin(115200);
     Wire.begin();
 #endif
     setSyncProvider(getTeensy3Time);
 
+    pinMode(FLASH_CS_PIN, OUTPUT);
+    digitalWrite(FLASH_CS_PIN, HIGH);
+    SPI.begin();
     //display.init();
+    //   digitalWrite(DISPLAY_RESET, HIGH);
+   //    delay(50);
+   //    digitalWrite(DISPLAY_RESET, LOW);
+    //display.setBusClock(1000000);
     display.begin();
     display.clear();
     display.setFont(u8g2_font_5x7_mf);
+    display.disableUTF8Print();
     display.setFontMode(0);
     display.setFontPosTop();
     display.setDrawColor(0);
@@ -802,9 +881,7 @@ void setup()
     NumBanks = NUM_BANKS;
    }
    digitalWrite(SD_CS_PIN, HIGH);
-
    setup_encoders();
-
 #ifdef WIFI
     WiFi.mode(WIFI_STA);
     WiFi.begin(ssid, password);    
@@ -865,8 +942,15 @@ void setup()
     MIDI.setHandleControlChange(midiControlChangeHandler);
     MIDI.setHandlePitchBend (midiPitchBendHandler);
     MIDI.setHandleProgramChange(midiProgramChangeHandler);
-    MIDI.setHandleControlChange(midiControlChangeHandler);
-    MIDI.begin(MIDI_IN_CHANNEL); 
+    MIDI.begin(synth.channel); 
+#endif
+#ifdef USB_MIDI
+    usbMIDI.setHandleNoteOn(midiNoteOnHandler);
+    usbMIDI.setHandleNoteOff(midiNoteOffHandler);
+    usbMIDI.setHandleControlChange(midiControlChangeHandler);
+    usbMIDI.setHandlePitchChange(midiPitchBendHandler);
+    usbMIDI.setHandleProgramChange(midiProgramChangeHandler);
+    //usbMIDI.begin(synth.channel);
 #endif
 #ifdef MIDI_USB_HOST
   usb_host.begin();
@@ -901,7 +985,7 @@ void reset()
     synth.algorithm = 0;
     synth.presetVoice = 0;
     synth.bank = 0;
-    synth.channel = 1;
+    synth.channel = MIDI_IN_CHANNEL;
     synth.playMode = false;
     synth.outputLeft = 0;
     synth.outputBufferLeft = 0;
@@ -1027,9 +1111,10 @@ void restoreBankIfSave() {
   if (synth.control == SAVE) {
           synth.bank = synth.prevBank;
           synth.presetVoice = synth.prevVoice;
-          maxvals[KNOB9] = NumVoices[synth.bank] + 1;
-          minvals[KNOB9] = 0;
-          knobs[KNOB9] = synth.presetVoice;
+          maxvals[PRESET_KNOB] = NumVoices[synth.bank] + 1;
+          minvals[PRESET_KNOB] = 0;
+          knobs[PRESET_KNOB] = synth.presetVoice;
+          knobs[ALG_KNOB] = synth.algorithm;
    }
 }
 
@@ -1087,8 +1172,9 @@ void loop()
                         synth.algorithm = 0;
                     else
                       ++synth.algorithm;
-                      lastUpdated = 1;
-                      synth.modified = true;
+                    knobs[ALG_KNOB] = synth.algorithm;
+                    lastUpdated = 1;
+                    synth.modified = true;
   #ifdef ESP8266
                     i2s_set_callback(DACAlgorithmsHandler[synth.algorithm]);
   #endif
@@ -1107,15 +1193,15 @@ void loop()
 
                     synth.modified = true;
                     break;
-                 case ADSR_BUTTON:
+                 case MENU_BUTTON:
                     if (synth.control == MENU) {
                       if(longPress) {
                           --menuStack;
                           if (menuStack == 0) {
                             synth.control = STANDBY;
-                            knobs[KNOB9] = synth.presetVoice;
-                            maxvals[KNOB9] = NumVoices[synth.bank] + 1;
-                            minvals[KNOB9] = 0;
+                            knobs[PRESET_KNOB] = synth.presetVoice;
+                            maxvals[PRESET_KNOB] = NumVoices[synth.bank] + 1;
+                            minvals[PRESET_KNOB] = 0;
                             lastUpdated = savedLastUpdated;
 
                           } else {
@@ -1123,9 +1209,9 @@ void loop()
                             selectedItem = prevSelectedItem[menuStack];
                             currentMenuItems = prevMenuItems[menuStack];
                             windowStart = prevWindowStart[menuStack];
-                            knobs[KNOB9] = selectedItem;
-                            maxvals[KNOB9] = currentMenuItems-1;
-                            minvals[KNOB9] = 0;
+                            knobs[MENU_KNOB] = selectedItem;
+                            maxvals[MENU_KNOB] = currentMenuItems-1;
+                            minvals[MENU_KNOB] = 0;
                           }
                         } else {
                           if (currentMenu[selectedItem].subMenu) {
@@ -1138,28 +1224,45 @@ void loop()
                             currentMenu = currentMenu[selectedItem].subMenu;
                             windowStart = 0;
                             selectedItem = 0;
-                            knobs[KNOB9] = 0;
-                            maxvals[KNOB9] = currentMenuItems-1;
-                            minvals[KNOB9] = 0;
+                            knobs[MENU_KNOB] = 0;
+                            maxvals[MENU_KNOB] = currentMenuItems-1;
+                            minvals[MENU_KNOB] = 0;
                           } else {
                             synth.control = MENU_EDIT;
-                            knobs[KNOB9] = *currentMenu[selectedItem].data;
-                            maxvals[KNOB9] = currentMenu[selectedItem].maxval;
-                            minvals[KNOB9] =  currentMenu[selectedItem].minval;
+                            knobs[MENU_KNOB] = *currentMenu[selectedItem].data;
+                            maxvals[MENU_KNOB] = currentMenu[selectedItem].maxval;
+                            minvals[MENU_KNOB] =  currentMenu[selectedItem].minval;
                           }
                       }
                      } else if (synth.control == MENU_EDIT) {
                         if (!longPress) {
-                          *currentMenu[selectedItem].data = knobs[KNOB9];
+                          *currentMenu[selectedItem].data = knobs[MENU_KNOB];
                           if (currentMenu[selectedItem].savefunc) {
                             currentMenu[selectedItem].savefunc();
+                        
                           }
                         }
                         synth.control = MENU;
-                        knobs[KNOB9] = 0;
-                        maxvals[KNOB9] = currentMenuItems-1;
-                        minvals[KNOB9] = 0;
-                     } else if (synth.control == SAVE) {
+                        knobs[MENU_KNOB] = 0;
+                        maxvals[MENU_KNOB] = currentMenuItems-1;
+                        minvals[MENU_KNOB] = 0;
+                     } else {
+                        synth.control = MENU;
+                        prevMenu[menuStack] = currentMenu;
+                        prevSelectedItem[menuStack] = selectedItem;
+                        prevMenuItems[menuStack] = currentMenuItems;
+                        prevWindowStart[menuStack] = windowStart;
+                        ++menuStack;
+                        knobs[MENU_KNOB] = 0;
+                        maxvals[MENU_KNOB] = currentMenuItems-1;
+                        minvals[MENU_KNOB] = 0;
+                        savedLastUpdated = lastUpdated;
+                        lastUpdated = 3;
+                     }
+                     break;
+                    
+                 case ADSR_BUTTON:
+                     if (synth.control == SAVE) {
                         if (longPress) {
                           restoreBankIfSave();
                           synth.control = STANDBY;
@@ -1186,20 +1289,7 @@ void loop()
                           lastUpdated = 0;
                         }
                      } else {
-                      if (longPress) {
-                        synth.control = MENU;
-                        prevMenu[menuStack] = currentMenu;
-                        prevSelectedItem[menuStack] = selectedItem;
-                        prevMenuItems[menuStack] = currentMenuItems;
-                        prevWindowStart[menuStack] = windowStart;
-                        ++menuStack;
-                        knobs[KNOB9] = 0;
-                        maxvals[KNOB9] = currentMenuItems-1;
-                        minvals[KNOB9] = 0;
-                        savedLastUpdated = lastUpdated;
-                        lastUpdated = 3;
-                      } else {
-                        // Sets the knobs to change the ADSR values of an operator (increments with every press).
+                       // Sets the knobs to change the ADSR values of an operator (increments with every press).
                         if (synth.control != ADSR)
                         {
                             synth.control = ADSR;
@@ -1213,8 +1303,8 @@ void loop()
                         updateKnobsParameters(synth.selectedOperator);
                         knobsNeedUpdating = true;
                         lastUpdated = 3;
-                       }
-                    }                
+                    }
+                                  
                     break;
                  case PRESET_BUTTON:
                     //Blat the save
@@ -1225,7 +1315,9 @@ void loop()
                         {
                             loadPresetVoice(synth.bank, synth.presetVoice);
                             ++synth.presetVoice;
-                            knobs[KNOB9] = synth.presetVoice;
+                            knobs[ALG_KNOB] = synth.algorithm;
+
+                            knobs[PRESET_KNOB] = synth.presetVoice;
                         }
                         else
                         {
@@ -1233,9 +1325,10 @@ void loop()
                             if (synth.bank == NUM_BANKS) synth.bank = 0;
                             loadPresetVoice(synth.bank, 0);
                             synth.presetVoice = 1;
-                            knobs[KNOB9] = synth.presetVoice;
-                            maxvals[KNOB9] = NumVoices[synth.bank] + 1;
-                            minvals[KNOB9] = 0;
+                            knobs[ALG_KNOB] = synth.algorithm;
+                            knobs[PRESET_KNOB] = synth.presetVoice;
+                            maxvals[PRESET_KNOB] = NumVoices[synth.bank] + 1;
+                            minvals[PRESET_KNOB] = 0;
                         }
                     }
                     // Prints parameters to the serial monitor.
@@ -1391,25 +1484,22 @@ void loop()
 
         }
     }
+    if (knobTriggered(ALG_KNOB))
+    {
+          lastUpdated = 1;
+          synth.algorithm = knobs[ALG_KNOB];
+          synth.modified = true;
+    }
     // Scans for the overall volume.
-    if (knobTriggered(KNOB8))
+    if (knobTriggered(VOLUME_KNOB))
     {
           lastUpdated = 2;
-          synth.volume = KNOBMAP(knobs[KNOB8]);
+          synth.volume = KNOBMAP(knobs[VOLUME_KNOB]);
+          eepromUpdate();
     }
-    if (knobTriggered(KNOB9)) 
+    if (knobTriggered(PRESET_KNOB)) 
     {  
-           if (synth.control == MENU) {
-              selectedItem = knobs[KNOB9];
-              if (selectedItem <  windowStart) {
-                windowStart = selectedItem;
-              } else if ((selectedItem -windowStart) + 1> MENU_LINES) {
-                windowStart = selectedItem+1 -MENU_LINES;
-              }
-              displayNeedsUpdating=true;
-           } else if (synth.control == MENU_EDIT) {
-              //Do nothing
-           } else if (synth.modified  && synth.control != SAVE && NumBanks > 1) {
+       if (synth.modified  && synth.control != SAVE && NumBanks > 1) {
           
              synth.prevBank = synth.bank;
              synth.prevVoice = synth.presetVoice; 
@@ -1418,40 +1508,60 @@ void loop()
              if (synth.presetVoice > NumVoices[synth.bank]) {
               synth.presetVoice = 1; 
              }
-             knobs[KNOB9] = synth.presetVoice;
-             maxvals[KNOB9] = NumVoices[synth.bank] +1;
-             minvals[KNOB9] = 0;
-           } else {
+             knobs[PRESET_KNOB] = synth.presetVoice;
+             maxvals[PRESET_KNOB] = NumVoices[synth.bank] +1;
+             minvals[PRESET_KNOB] = 0;
+       } else {
              if (synth.control != SAVE) synth.control = STANDBY;
            
-             if (knobs[KNOB9] == 0) {
+             if (knobs[PRESET_KNOB] == 0) {
                if (synth.control != SAVE ) {
                 if (synth.bank == 0) synth.bank = NumBanks-1;
                 else synth.bank--;
                }
                synth.presetVoice = NumVoices[synth.bank];
-               knobs[KNOB9] = NumVoices[synth.bank];
-               maxvals[KNOB9] = NumVoices[synth.bank] +1;
-               minvals[KNOB9] = 0;
-             } else if (knobs[KNOB9] == NumVoices[synth.bank] +1) {
+               knobs[PRESET_KNOB] = NumVoices[synth.bank];
+               maxvals[PRESET_KNOB] = NumVoices[synth.bank] +1;
+               minvals[PRESET_KNOB] = 0;
+             } else if (knobs[PRESET_KNOB] == NumVoices[synth.bank] +1) {
                if (synth.control != SAVE) {
                  if (synth.bank == NumBanks -1) synth.bank = 0;
                  else synth.bank++;
                }
                synth.presetVoice = 1;
-               knobs[KNOB9] = 1;
-               maxvals[KNOB9] = NumVoices[synth.bank] +1;
-               minvals[KNOB9] = 0;
+               knobs[PRESET_KNOB] = 1;
+               maxvals[PRESET_KNOB] = NumVoices[synth.bank] +1;
+               minvals[PRESET_KNOB] = 0;
 
              } else {
-               synth.presetVoice = knobs[KNOB9];
+               synth.presetVoice = knobs[PRESET_KNOB];
              }
              if (synth.control != SAVE) {
               loadPresetVoice(synth.bank, synth.presetVoice -1);
+              knobs[ALG_KNOB] = synth.algorithm;
+
               lastUpdated = 0;
               synth.playMode = true;
               printParameters();
-            }
+             } 
+        }
+        if (PRESET_KNOB == MENU_KNOB) {
+          knobChanged[PRESET_KNOB] = true;
+        }
+    }
+    if (knobTriggered(MENU_KNOB)) {
+      if (synth.control == MENU) {
+              selectedItem = knobs[MENU_KNOB];
+              if (selectedItem <  windowStart) {
+                windowStart = selectedItem;
+              } else if ((selectedItem -windowStart) + 1> MENU_LINES) {
+                windowStart = selectedItem+1 -MENU_LINES;
+              }
+              displayNeedsUpdating=true;
+           } else if (synth.control == MENU_EDIT) {
+              //Do nothing
+           } else {
+               //Do nothing
            }
     }
     // Scans for MIDI note on/off messages.
@@ -1469,6 +1579,9 @@ void loop()
 #ifdef MIDI_USB_HOST
     usb_host.Task();
     midi_usb.read();
+#endif
+#ifdef USB_MIDI
+    MIDI2.read();
 #endif
     if (displayNeedsUpdating && millis() - lastDisplayUpdate > 100) {
       updateDisplay();
@@ -1504,9 +1617,11 @@ void loop()
       standbyMessage = NULL;
       displayNeedsUpdating = true;
     }
-    if (eepromWrite && eepromMillis > 50) {
+    if (eepromWrite && eepromMillis > 50UL) {
+      Serial.println("Write EEPROM");
       WriteEEPROM();
       eepromWrite = false;
+      eepromMillis = 0;
     }
 }
 
@@ -1528,11 +1643,11 @@ void OnAppleMidiDisconnected(uint32_t ssrc) {
 
 void midiNoteOnHandler(byte channel, byte note, byte velocity)
 {
+    if (channel != synth.channel) return;
     Serial.print("REceive cahnnel ");
     Serial.print(channel);
     Serial.print(" note ");
     Serial.println(note);
-    
     // Check if the note is in the valid range.
     if (note >= LOWEST_KEY && note <= HIGHEST_KEY)
     {
@@ -1596,6 +1711,7 @@ void midiNoteOnHandler(byte channel, byte note, byte velocity)
 
 void midiNoteOffHandler(byte channel, byte note, byte velocity)
 {
+    if (channel != synth.channel) return;
     if (note >= LOWEST_KEY && note <= HIGHEST_KEY)
     {
         uint8_t keyIndex = note - LOWEST_KEY;
@@ -1628,6 +1744,7 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
     int8_t knob;
     uint16_t newvalue;
     // In case the message was from the sustain pedal.
+    if (channel != synth.channel) return;
     switch(number) {
         case SUSTAIN_PEDAL: 
         // In case it is now off.
@@ -1664,17 +1781,18 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
         case VOLUME_CC_MSB:
           last14BitCC[number]  = ((last14BitCC[number] & 0x7f) | ((value&0x7f)<<7));
           synth.volume = map(last14BitCC[number], 0, MAX_MIDI_VALUE_14, 0, MAX_ANALOG_VALUE);
-          knobs[KNOB8] = map(synth.volume, 0, MAX_ANALOG_VALUE, 0, MAX_DIGITAL_VALUE);
+          knobs[VOLUME_KNOB] = PARAMMAP(synth.volume);
           //Serial.printf("Volume = %d\n", last14BitCC[number]); 
+          eepromUpdate();
           displayNeedsUpdating = true;
           break;
         case VOLUME_CC_LSB:
           last14BitCC[number-CC_LSB_MSB_OFFSET]  = (last14BitCC[number-CC_LSB_MSB_OFFSET] & 0xff80) | (value & 0x7f);
           synth.volume = map(last14BitCC[number-CC_LSB_MSB_OFFSET], 0, MAX_MIDI_VALUE_14, 0, MAX_ANALOG_VALUE);
-          knobs[KNOB8] = map(synth.volume, 0, MAX_ANALOG_VALUE, 0, MAX_DIGITAL_VALUE);
+          knobs[VOLUME_KNOB] = PARAMMAP(synth.volume);
           //Serial.printf("VolumeLSB = %d\n", last14BitCC[number-CC_LSB_MSB_OFFSET]); 
+          eepromUpdate();
           displayNeedsUpdating = true;
-
           break;
         case SOUND_CC_1_LSB: //algorithm select
           //newalg  = map(value, 0, MAX_MIDI_VALUE_7, 0,NUM_ALGORITHMS -1);
@@ -1682,7 +1800,7 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
           if (newalg > NUM_ALGORITHMS -1) newalg = NUM_ALGORITHMS -1;
           if (newalg != synth.algorithm) {
             synth.algorithm = newalg;
-            //knobs[KNOB9] = newalg;
+            knobs[ALG_KNOB] = newalg;
 #ifdef ESP8266
             i2s_set_callback(DACAlgorithmsHandler[synth.algorithm]);
 #endif
@@ -1905,10 +2023,13 @@ void midiControlChangeHandler(byte channel, byte number, byte value)
 
 void midiProgramChangeHandler(byte channel,  byte program) 
 {
+    if (channel != synth.channel) return;
     //Serial.println(program);
     if(program + 1 > NumVoices[synth.bank]) program = 0;
     loadPresetVoice(synth.bank, program);
-    knobs[KNOB9] = program;
+    knobs[PRESET_KNOB] = program;
+    knobs[ALG_KNOB] = synth.algorithm;
+
     synth.presetVoice = program + 1;
     synth.playMode = true;
     synth.control = STANDBY;
@@ -1918,6 +2039,7 @@ void midiProgramChangeHandler(byte channel,  byte program)
 
 void midiPitchBendHandler(byte channel, int bend)
 {
+    if (channel != synth.channel) return;
     if (bend < 0)
     {
         synth.pitchBend.bentDown = true;
@@ -2312,12 +2434,14 @@ __attribute__((always_inline)) inline void updateKnobsParameters(uint8_t operato
 
     for (int x = KNOB8; x < MAX_KNOBS; x++) {
          //synth.knobs.oldValue[x] = KNOBMAP(knobs[x]);
-         if (x == KNOB9) maxvals[x] = NumVoices[synth.bank] +1; //NOT -1  
+         if (x == PRESET_KNOB) maxvals[x] = NumVoices[synth.bank] +1; //NOT -1
+         else if (x == ALG_KNOB) maxvals[x] = NUM_ALGORITHMS -1;
          else maxvals[x] = MAX_DIGITAL_VALUE;
          minvals[x] = 0;
     }
-    knobs[KNOB8] = PARAMMAP(synth.volume);
-    knobs[KNOB9] = synth.presetVoice; //NOT -1
+    knobs[VOLUME_KNOB] = PARAMMAP(synth.volume);
+    knobs[ALG_KNOB] = synth.algorithm;
+    knobs[PRESET_KNOB] = synth.presetVoice; //NOT -1
     lastUpdated = 0;
 }
 
@@ -2393,38 +2517,40 @@ __attribute__((always_inline)) inline void savePresetVoice(uint8_t bank, uint8_t
 }
 
 
-int lup = 1;
-void updateHighlight()
+static int lup = 1;
+inline void updateHighlight()
 {
   if (lastUpdated == lup++) display.setDrawColor(0);
   else display.setDrawColor(1);
 }
-void nonHighlightSpace(char * spc)
+
+inline void nonHighlightSpace(const char * spc)
 {
   display.setDrawColor(1);
   display.printf(spc);
 }
 __attribute__((always_inline)) inline void updateDisplay()
 {
-  updatingDisplay = true;
   const uint8_t font_height = 7;
   int o = synth.selectedOperator;
   int n = 0;
   lup = 1;
+  updatingDisplay = true;
   display.clearBuffer();
   display.setCursor(0,n++*font_height);
-  
   display.printf("PATCH: %02d %s", synth.presetVoice, patchNames[synth.bank][synth.presetVoice -1]);    
-  
-  display.setCursor(0,n++*font_height);  
+
+  display.setCursor(0,n++*font_height);
   updateHighlight();
   display.printf("ALG: %-4d",  synth.algorithm);
   nonHighlightSpace(" ");
   updateHighlight();
+
   display.printf("VOL: %-4d%% ", map(synth.volume, 0, MAX_ANALOG_VALUE, 0, 100));    
   display.setCursor(0,n++*font_height);
-  display.setDrawColor(1);
+  display.setDrawColor(1);  
   display.printf("MOD: ");
+
   if (synth.control == PARAMETERS || synth.control == ADSR) {
       updateHighlight();
       display.printf("%s %-2d", knobsControlDisp[synth.control], o);
@@ -2439,14 +2565,16 @@ __attribute__((always_inline)) inline void updateDisplay()
   }
   display.setCursor(0,n++*font_height);
   updateHighlight();
+
   display.printf("LSL: %s%-2d", levelScalingFunctionDisp[operators[o].levelScaling.function[0]],
     operators[o].levelScaling.sign[0]);
+
   nonHighlightSpace(" ");
   updateHighlight();
+
   display.printf("LSR: %s%-2d",levelScalingFunctionDisp[operators[o].levelScaling.function[1]],
     operators[o].levelScaling.sign[1]);
-    
-    
+
   if (synth.control == PARAMETERS) {
     display.setCursor(0,n++*font_height);
     updateHighlight();
@@ -2475,6 +2603,7 @@ __attribute__((always_inline)) inline void updateDisplay()
     nonHighlightSpace("   ");
 
   }
+
   if (synth.control == ADSR) {
         display.setCursor(0,n++*font_height);
         updateHighlight();
@@ -2516,22 +2645,28 @@ __attribute__((always_inline)) inline void updateDisplay()
      for (int x = 0; x < MENU_LINES ; x++) {
       display.setCursor(0,n++*font_height);
       if(x+windowStart < currentMenuItems) {
-        char * prt = currentMenu[x + windowStart].line;
-        uint8_t data =  *currentMenu[x].data;
+        const char * prt = currentMenu[x + windowStart].line;
+        uint8_t * mdata =  currentMenu[x + windowStart].data;
+        uint8_t ddata = 0;
+        const char ** disp = currentMenu[x + windowStart].textdisp;
+        menu_t * smenu = currentMenu[x + windowStart].subMenu;
         if (x+windowStart == selectedItem && synth.control == MENU_EDIT) {
-             data =  knobs[KNOB9];
-        }  
-        char * disp = "";
-        if (currentMenu[x + windowStart].textdisp) {
-          disp = currentMenu[x + windowStart].textdisp[data];
+           ddata =  knobs[MENU_KNOB];
+        } else if (mdata) {
+           ddata = *mdata;
         }
-        display.printf(prt, data, disp);
+        if (disp) {
+          display.printf(prt, ddata, disp[ddata]);
+        } else if (smenu) {
+          display.printf(prt);
+        } else {
+          display.printf(prt, ddata);
+        }
         if (x+windowStart == selectedItem) {
-          
-           display.write (0xab);
+          display.write (0xab);
         } 
-      }
-     }  
+      }  
+    }  
   }
   display.sendBuffer();
   updatingDisplay = false;
@@ -2539,95 +2674,103 @@ __attribute__((always_inline)) inline void updateDisplay()
 }
 
 
+__attribute__((always_inline)) inline void allControlChange(char controlNumber, char controlValue, char channel)
+{
+  MIDI1.sendControlChange(controlNumber, controlValue, channel);
+#ifdef USB_MIDI
+  MIDI2.sendControlChange(controlNumber, controlValue, channel);
+#endif
+}
+
 __attribute__((always_inline)) inline void updateRemoteKnobs()
 {
   int o = synth.selectedOperator;
 #define DEL 5
 
-   MIDI1.sendControlChange( SOUND_CC_1_LSB, synth.algorithm, synth.channel); 
+ allControlChange( SOUND_CC_1_LSB, synth.algorithm, synth.channel); 
   
-   MIDI1.sendControlChange(synth.channel, VOLUME_CC_MSB, synth.volume >>7);    
-   MIDI1.sendControlChange(synth.channel, VOLUME_CC_LSB, synth.volume &0x7f);    
+ allControlChange(synth.channel, VOLUME_CC_MSB, synth.volume >>7);    
+ allControlChange(synth.channel, VOLUME_CC_LSB, synth.volume &0x7f);    
   //MIDI1.sendControlChange(synth.channel, GP5_CC_MSB, (synth.control == ADSR) *127);
   if (synth.control == PARAMETERS || synth.control == ADSR) {
     delay(DEL);
-    MIDI1.sendControlChange(GP1_CC_MSB, o, synth.channel);
+  allControlChange(GP1_CC_MSB, o, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(GP4_CC_MSB, operators[o].src_sel, synth.channel);
+  allControlChange(GP4_CC_MSB, operators[o].src_sel, synth.channel);
     delay(DEL);
   } 
   
-  MIDI1.sendControlChange(GP2_CC_MSB, lsToCycle(0), synth.channel);
+allControlChange(GP2_CC_MSB, lsToCycle(0), synth.channel);
   delay(DEL);
-  MIDI1.sendControlChange(GP3_CC_MSB, lsToCycle(1), synth.channel);
+allControlChange(GP3_CC_MSB, lsToCycle(1), synth.channel);
   if (synth.control == PARAMETERS) {
     delay(DEL);
-    MIDI1.sendControlChange(U1_CC_MSB, operators[o].ratio >> 7 & 0x7f, synth.channel);
+  allControlChange(U1_CC_MSB, operators[o].ratio >> 7 & 0x7f, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U1_CC_LSB, operators[o].ratio& 0x7f, synth.channel);
+  allControlChange(U1_CC_LSB, operators[o].ratio& 0x7f, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U2_CC_MSB, operators[o].level >> 7, synth.channel);
+  allControlChange(U2_CC_MSB, operators[o].level >> 7, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U2_CC_LSB, operators[o].level & 0x7f, synth.channel);
+  allControlChange(U2_CC_LSB, operators[o].level & 0x7f, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U3_CC_MSB, operators[o].feedback >> 7, synth.channel);
+  allControlChange(U3_CC_MSB, operators[o].feedback >> 7, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U3_CC_LSB, operators[o].feedback & 0x7f, synth.channel);
+  allControlChange(U3_CC_LSB, operators[o].feedback & 0x7f, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U4_CC_MSB, 0, synth.channel);
+  allControlChange(U4_CC_MSB, 0, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U4_CC_LSB, operators[o].velocity &0x7f, synth.channel);
+  allControlChange(U4_CC_LSB, operators[o].velocity &0x7f, synth.channel);
     delay(DEL);
-   MIDI1.sendControlChange(U5_CC_MSB, 0, synth.channel);    
+ allControlChange(U5_CC_MSB, 0, synth.channel);    
     delay(DEL);
-    MIDI1.sendControlChange(U5_CC_LSB, operators[o].rateScaling & 0x7f, synth.channel);    
+  allControlChange(U5_CC_LSB, operators[o].rateScaling & 0x7f, synth.channel);    
     delay(DEL);
-   MIDI1.sendControlChange(U6_CC_MSB, operators[o].levelScaling.depth[0] >> 7, synth.channel);  
+ allControlChange(U6_CC_MSB, operators[o].levelScaling.depth[0] >> 7, synth.channel);  
     delay(DEL);
-   MIDI1.sendControlChange(U6_CC_LSB, operators[o].levelScaling.depth[0] & 0x7f, synth.channel);  
+ allControlChange(U6_CC_LSB, operators[o].levelScaling.depth[0] & 0x7f, synth.channel);  
      delay(DEL);
-    MIDI1.sendControlChange(U7_CC_MSB, operators[o].levelScaling.depth[1] >> 7, synth.channel);
+  allControlChange(U7_CC_MSB, operators[o].levelScaling.depth[1] >> 7, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U7_CC_LSB, operators[o].levelScaling.depth[1] & 0x7f, synth.channel);
+  allControlChange(U7_CC_LSB, operators[o].levelScaling.depth[1] & 0x7f, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U8_CC_MSB, 0, synth.channel);
+  allControlChange(U8_CC_MSB, 0, synth.channel);
     delay(DEL);
-    MIDI1.sendControlChange(U8_CC_LSB, operators[o].levelScaling.breakPointKey, synth.channel);
+  allControlChange(U8_CC_LSB, operators[o].levelScaling.breakPointKey, synth.channel);
     delay(DEL);
  }
   if (synth.control == ADSR) {
      delay(DEL);
-       MIDI1.sendControlChange(U1_CC_MSB, (operators[o].adsr.rate[0] >> 7) & 0x7f, synth.channel);
+     allControlChange(U1_CC_MSB, (operators[o].adsr.rate[0] >> 7) & 0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U1_CC_LSB, (operators[o].adsr.rate[0] & 0x7f), synth.channel);
+      allControlChange(U1_CC_LSB, (operators[o].adsr.rate[0] & 0x7f), synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U2_CC_MSB, operators[o].adsr.level[0] >> 7, synth.channel);
+      allControlChange(U2_CC_MSB, operators[o].adsr.level[0] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U2_CC_LSB, operators[o].adsr.level[0] & 0x7f, synth.channel);
+      allControlChange(U2_CC_LSB, operators[o].adsr.level[0] & 0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U3_CC_MSB, operators[o].adsr.rate[1] >> 7, synth.channel);
+      allControlChange(U3_CC_MSB, operators[o].adsr.rate[1] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U3_CC_LSB, operators[o].adsr.rate[1] & 0x7f, synth.channel);
+      allControlChange(U3_CC_LSB, operators[o].adsr.rate[1] & 0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U4_CC_MSB, operators[o].adsr.level[1] >> 7, synth.channel);
+      allControlChange(U4_CC_MSB, operators[o].adsr.level[1] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U4_CC_LSB, operators[o].adsr.level[1] &0x7f, synth.channel);
+      allControlChange(U4_CC_LSB, operators[o].adsr.level[1] &0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U5_CC_MSB, operators[o].adsr.rate[2] >> 7, synth.channel);
+      allControlChange(U5_CC_MSB, operators[o].adsr.rate[2] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U5_CC_LSB, operators[o].adsr.rate[2] & 0x7f, synth.channel);
+      allControlChange(U5_CC_LSB, operators[o].adsr.rate[2] & 0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U6_CC_MSB, operators[o].adsr.level[2] >> 7, synth.channel);
+      allControlChange(U6_CC_MSB, operators[o].adsr.level[2] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U6_CC_LSB, operators[o].adsr.level[2]  &0x7f, synth.channel);
+      allControlChange(U6_CC_LSB, operators[o].adsr.level[2]  &0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U7_CC_MSB, operators[o].adsr.rate[3] >> 7, synth.channel);
+      allControlChange(U7_CC_MSB, operators[o].adsr.rate[3] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U7_CC_LSB, operators[o].adsr.rate[3] & 0x7f, synth.channel);
+      allControlChange(U7_CC_LSB, operators[o].adsr.rate[3] & 0x7f, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U8_CC_MSB, operators[o].adsr.level[3] >> 7, synth.channel);
+      allControlChange(U8_CC_MSB, operators[o].adsr.level[3] >> 7, synth.channel);
     delay(DEL);
-        MIDI1.sendControlChange(U8_CC_LSB, operators[o].adsr.level[3] & 0x7f, synth.channel);
+      allControlChange(U8_CC_LSB, operators[o].adsr.level[3] & 0x7f, synth.channel);
     delay(DEL);
   }
 }

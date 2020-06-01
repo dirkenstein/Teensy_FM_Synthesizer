@@ -1,9 +1,9 @@
 #include <Arduino.h>
 #include "Teensy_FM_Synthesizer.h"
 
-char * adsrParamDisp [] = {"ATK", "DEC", "SUS", "REL"};
-char * levelScalingFunctionDisp [] = {"OFF", "LIN", "EXP"};
-char * knobsControlDisp[] = {"STBY", "ADSR", "PARM",  "MENU", "SAVE", "EDIT"};
+const char * adsrParamDisp [] = {"ATK", "DEC", "SUS", "REL"};
+const char * levelScalingFunctionDisp [] = {"OFF", "LIN", "EXP"};
+const char * knobsControlDisp[] = {"STBY", "ADSR", "PARM",  "MENU", "SAVE", "EDIT"};
 
 const uint8_t feedBackOsc [NUM_ALGORITHMS] = 
     {5,1,5,3,5,4,5,4,1,2,4,1,5,4,4,5,1,3,5,2,2,5,5,5,5,5,2,4,5,4,5,5};
@@ -169,7 +169,7 @@ const int16_t sqrTable [SINE_TABLE_SIZE] = {
   };
 
 // Preset voices parameters for the operators.
-int16_t default_presetVoice[PRESET_VOICES][NUM_OPERATORS][NUM_VOICE_PARAMS] = { { {0, 129, 0, 4095, 0, 0, 0, 0, 60, 0, 1, 1, 0, 0, 0, 50, 512, 20, 4095, 2000, 0, 0},
+const int16_t default_presetVoice[PRESET_VOICES][NUM_OPERATORS][NUM_VOICE_PARAMS] = { { {0, 129, 0, 4095, 0, 0, 0, 0, 60, 0, 1, 1, 0, 0, 0, 50, 512, 20, 4095, 2000, 0, 0},
                                                             {0, 129, 0, 1000, 0,0, 0, 100, 69, 100, 1, -1, 1, 1, 0, 70, 512, 20, 4095, 2500, 0, 0},
                                                             {0, 128, 0, 4095, 0, 0, 0, 0, 60, 0, 1, 1, 0, 0, 0, 50, 512, 20, 4095, 2000, 0, 0},
                                                             {0, 129, 0, 1000, 0, 0, 0, 100, 69, 100, 1, -1, 1, 1, 0, 70, 512, 20, 4095, 2500, 0, 0},
@@ -177,6 +177,6 @@ int16_t default_presetVoice[PRESET_VOICES][NUM_OPERATORS][NUM_VOICE_PARAMS] = { 
                                                             {0, 2441,0, 100, 200, 0, 0, 200, 69, 300, 1, -1, 1, 1, 0, 25, 128, 20, 4095, 800, 0, 0} } };
 
 // Preset voices algorithms.
-uint8_t default_presetAlgorithm[PRESET_VOICES] = {4};
+const uint8_t default_presetAlgorithm[PRESET_VOICES] = {4};
 
-char * default_patchNames[PRESET_VOICES] = {"Default"};
+const char * default_patchNames[PRESET_VOICES] = {"Default"};
